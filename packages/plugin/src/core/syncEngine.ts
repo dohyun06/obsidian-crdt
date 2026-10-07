@@ -163,7 +163,7 @@ export class SyncEngine {
     const guard = new MassDeleteGuard({ threshold: this.timing.massDeleteThreshold, windowMs: this.timing.massDeleteWindowMs, now: this.now });
     const local = new LocalChangeHandler({ vault, index, records, docs, reconciler, guard, now: this.now, notify: this.notify, isEligible, isOpenInEditor: this.isOpenInEditor });
     const applier = new IndexApplier({ vault, index, records, docs, reconciler, isEligible, requestPass: () => this.scheduleIndexPass() });
-    const scan = new StartupScan({ vault, records, reconciler, local, applier, isEligible });
+    const scan = new StartupScan({ vault, records, reconciler, local, applier, isEligible, notify: this.notify });
     this.wiring = { records, docs, index, indexSync, indexPersisted, indexDoc, reconciler, local, applier, echoes, scan };
     return this.wiring;
   }
@@ -197,6 +197,7 @@ export class SyncEngine {
   }
 
   private scheduleDeleteCommit(): void {
+    if (this.stopped) return;
     this.debouncer.schedule("deletes", this.timing.renamePairWindowMs, () => {
       void this.enqueue(({ local }) => local.commitPendingDeletes());
     });

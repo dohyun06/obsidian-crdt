@@ -80,6 +80,43 @@ describe("startup scan and bootstrap", () => {
   });
 });
 
+describe("startup failure isolation and interruption", () => {
+  it("keeps scanning when one file fails to read", async () => {
+    const hub = new LoopbackHub();
+    const a = await start(hub, "A", { "remote.md": "from A" });
+    await settle([a]);
+    const b = createDevice(hub, "B", { files: { "bad.md": "x", "good.md": "ok" } });
+    running.push(b);
+    const read = b.vault.read.bind(b.vault);
+    b.vault.read = async (path) => {
+      if (path === "bad.md") throw new Error("disk exploded");
+      return read(path);
+    };
+    await b.engine.start();
+    await settle([a, b]);
+    expect(b.notices).toContainEqual({ kind: "task-failed", message: "disk exploded" });
+    expect(hub.serverText(fileDocName(b, "good.md"))).toBe("ok");
+    expect(b.vault.files.get("remote.md")).toBe("from A");
+  });
+
+  it("recovers from a bootstrap interrupted right after start", async () => {
+    const hub = new LoopbackHub();
+    const a = await start(hub, "A", { "a.md": "new" });
+    await settle([a]);
+    const first = await start(hub, "B", { "a.md": "old" });
+    await first.engine.stop();
+    running.splice(running.indexOf(first), 1);
+    const b = await restartDevice(hub, first);
+    running.push(b);
+    await settle([a, b]);
+    const copies = [...b.vault.files.keys()].filter((path) => path.includes("(conflict-disk"));
+    expect(copies).toHaveLength(1);
+    expect(b.vault.files.get(copies[0]!)).toBe("old");
+    expect(b.vault.files.get("a.md")).toBe("new");
+    expect(hub.serverText(fileDocName(a, "a.md"))).toBe("new");
+  });
+});
+
 describe("recovery after a device was closed", () => {
   it("does not revert remote edits made while the device was closed (regression: closed-device revert)", async () => {
     const hub = new LoopbackHub();
