@@ -1,7 +1,7 @@
 import type { ConnectionStatus } from "../core/hocuspocusSyncer";
 import type { SyncNotice } from "../core/notices";
 import type { DocPersistence, DocSyncer, StoragePort, VaultPort } from "../core/ports";
-import { EngineStoppedError, SyncEngine, type SyncTiming } from "../core/syncEngine";
+import { type DebugLog, EngineStoppedError, SyncEngine, type SyncTiming } from "../core/syncEngine";
 import type { EditorDocSource } from "../editor/editorBridge";
 import type { SessionConfig } from "../settings/settings";
 import type { SyncStatus } from "./status";
@@ -36,6 +36,8 @@ export interface SessionDeps {
   /** The token was rejected. The session only pauses itself; the owner must stop it (after detaching editors). */
   onAuthFailed(): void;
   timing?: Partial<SyncTiming>;
+  /** Content-free engine diagnostics; the owner decides whether to print them. */
+  debug?: DebugLog;
 }
 
 /** One running sync: storage + syncer + engine, started and stopped together. */
@@ -159,6 +161,7 @@ export class SyncSession {
       excludedPrefixes: this.deps.excludedPrefixes,
       notify: (notice) => this.onNotice(notice),
       timing: this.deps.timing,
+      debug: this.deps.debug,
     });
   }
 

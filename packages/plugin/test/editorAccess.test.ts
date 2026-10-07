@@ -100,3 +100,21 @@ describe("files open in an editor are tracked by fileId (regression: rename of a
     expect(a.vault.files.get("n.md")).toBe("hello\nremote\n");
   });
 });
+
+describe("debug events", () => {
+  it("logs routed vault events, echoes, opens and closes without note text", async () => {
+    const { a, b } = await pairWithNote("secret body\n");
+    a.vault.externalRename("n.md", "m.md");
+    await settle([a, b]);
+    const doc = (await b.engine.openDocForPath("m.md", "secret body\nsecret typed\n"))!;
+    b.engine.notifyEditorClosed("m.md", doc.fileId);
+    await settle([a, b]);
+    const names = (device: Device) => device.debugEvents.map((entry) => entry.event);
+    expect(a.debugEvents).toContainEqual({ event: "vault-event", fields: { kind: "rename", oldPath: "n.md", path: "m.md" } });
+    expect(names(b)).toContain("echo-consumed"); // B's own rename of the file, applied from the index
+    expect(b.debugEvents).toContainEqual({ event: "open-doc", fields: { path: "m.md", outcome: "absorbed-merge" } });
+    expect(b.debugEvents).toContainEqual({ event: "editor-open", fields: { fileId: doc.fileId, count: 1 } });
+    expect(b.debugEvents).toContainEqual({ event: "editor-closed", fields: { fileId: doc.fileId, stillOpen: false } });
+    expect(JSON.stringify([...a.debugEvents, ...b.debugEvents])).not.toContain("secret");
+  });
+});

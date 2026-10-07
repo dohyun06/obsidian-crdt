@@ -61,6 +61,7 @@ function setup() {
   const source = new FakeSource();
   const files = new Map<EditorView, { path: string | null }>();
   const errors: unknown[] = [];
+  const debug: string[] = [];
   const bridge = new EditorBridge({
     getSource: () => source,
     getUser: () => USER,
@@ -70,6 +71,7 @@ function setup() {
     },
     reportError: (error) => errors.push(error),
     retry: { initialDelayMs: 5, maxDelayMs: 20 },
+    debug: (event, fields) => debug.push(`${event} ${JSON.stringify(fields)}`),
   });
   let pendingPath: string | null = null;
   const open = (path: string, content: string) => {
@@ -80,7 +82,7 @@ function setup() {
     views.push(view);
     return { view, info };
   };
-  return { source, bridge, open, errors };
+  return { source, bridge, open, errors, debug };
 }
 
 describe("EditorBridge", () => {
@@ -257,5 +259,24 @@ describe("EditorBridge", () => {
     await tick(10);
     expect(source.openCount("a.md")).toBe(0);
     expect(bridge.isOpen("a.md")).toBe(false);
+  });
+
+  it("logs binding steps without note text", async () => {
+    const { source, bridge, open, debug } = setup();
+    source.track("a.md", "secret");
+    const late = open("late.md", "secret too");
+    const { view, info } = open("a.md", "secret");
+    await tick(8);
+    info.path = "b.md"; // the guard drops the binding on the next transaction
+    view.dispatch({ changes: { from: 0, insert: "secret!" } });
+    bridge.rebindAll();
+    late.view.destroy();
+    views.splice(views.indexOf(late.view), 1);
+    await tick(30);
+    const names = debug.map((line) => line.split(" ")[0]);
+    for (const name of ["bind-requested", "bind-attached", "bind-retry", "bind-given-up", "guard-drop", "release", "rebind"]) {
+      expect(names).toContain(name);
+    }
+    expect(debug.join("\n")).not.toContain("secret");
   });
 });

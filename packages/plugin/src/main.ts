@@ -33,6 +33,7 @@ export default class CrdtSyncPlugin extends Plugin {
       fileOf: (state) => state.field(editorInfoField, false)?.file?.path ?? null,
       saveEditor: (view, path) => this.saveEditor(view, path),
       reportError: (error) => console.error("CRDT Sync: editor binding failed", error),
+      debug: (event, fields) => this.debugLog(event, fields),
     });
     this.registerEditorExtension(this.bridge.extension());
     this.addSettingTab(new CrdtSyncSettingTab(this.app, this));
@@ -148,8 +149,14 @@ export default class CrdtSyncPlugin extends Plugin {
       onStatus: (status) => this.statusBar?.render(status),
       onNotice: (notice) => this.showNotice(notice, session),
       onAuthFailed: () => this.stopSessionThroughChain(),
+      debug: (event, fields) => this.debugLog(event, fields),
     });
     return session;
+  }
+
+  /** Checked on every call, so toggling the setting takes effect without a restart. Fields never hold note text. */
+  private debugLog(event: string, fields: Record<string, string | number | boolean>): void {
+    if (this.settings.debugLogging) console.debug("CRDT Sync", event, fields);
   }
 
   private async openStorage(config: SessionConfig): Promise<SessionStorage> {

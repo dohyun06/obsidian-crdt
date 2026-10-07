@@ -80,6 +80,16 @@ describe("SyncSession", () => {
     expect(a.statuses).toEqual(["starting", "connected"]);
   });
 
+  it("passes content-free debug events from the engine to the owner", async () => {
+    const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const a = makeSession(new LoopbackHub(), { debug: (event, fields) => events.push({ event, fields }) });
+    await a.session.start();
+    a.vault.externalWrite("n.md", "secret note text");
+    await settleAll();
+    expect(events).toContainEqual({ event: "vault-event", fields: { kind: "create", path: "n.md" } });
+    expect(JSON.stringify(events)).not.toContain("secret");
+  });
+
   it("stops by flushing storage, closing it and destroying the syncer", async () => {
     const a = makeSession(new LoopbackHub());
     await a.session.start();
