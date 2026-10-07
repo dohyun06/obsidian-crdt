@@ -83,6 +83,7 @@ export class SyncEngine {
   private readonly debouncer = new KeyedDebouncer();
   private readonly disposers: Array<() => void> = [];
   private wiring: Wiring | null = null;
+  private releasing: Promise<void> = Promise.resolve();
   private stopped = false;
   private signalStopped: () => void = () => {};
   private readonly stoppedSignal = new Promise<void>((resolve) => {
@@ -98,7 +99,9 @@ export class SyncEngine {
 
   async start(): Promise<void> {
     const wiring = await this.wire();
+    await this.abortIfStopped(); // stop() may have run while wire() was loading and found nothing to tear down
     if (!(await this.deps.storage.getFlag(BOOTSTRAP_FLAG))) await this.waitForFirstSync(wiring.indexSync);
+    await this.abortIfStopped(); // stop() already removed the listeners; registering them now would leak them
     this.disposers.push(wiring.index.onRemoteChange(() => this.scheduleIndexPass()));
     this.disposers.push(this.deps.vault.onEvent((event) => this.route(event)));
     await this.enqueue((ready) => ready.scan.run());
@@ -113,13 +116,7 @@ export class SyncEngine {
     for (const dispose of this.disposers.splice(0)) dispose();
     this.debouncer.cancelAll();
     await this.queue.enqueue(async () => {}); // queued tasks are skipped now; wait for the running one to finish
-    const wiring = this.wiring;
-    this.wiring = null;
-    if (!wiring) return;
-    await wiring.docs.closeAll();
-    wiring.indexSync.destroy();
-    wiring.indexPersisted.destroy();
-    wiring.indexDoc.destroy();
+    await this.teardown();
   }
 
   /** Resolves when no timers are pending and the queue is empty. Used by tests and shutdown. */
@@ -178,6 +175,23 @@ export class SyncEngine {
     const scan = new StartupScan({ vault, records, reconciler, local, applier, isEligible, notify: this.notify });
     this.wiring = { records, docs, index, indexSync, indexPersisted, indexDoc, reconciler, local, applier, echoes, scan };
     return this.wiring;
+  }
+
+  /**
+   * Idempotent: whichever of stop() and an interrupted start() gets here first releases the wiring;
+   * the other waits for that release instead of returning early.
+   */
+  private async teardown(): Promise<void> {
+    const wiring = this.wiring;
+    this.wiring = null;
+    if (wiring) this.releasing = releaseWiring(wiring);
+    await this.releasing;
+  }
+
+  private async abortIfStopped(): Promise<void> {
+    if (!this.stopped) return;
+    await this.teardown();
+    throw new EngineStoppedError();
   }
 
   private async waitForFirstSync(indexSync: DocSyncHandle): Promise<void> {
@@ -245,4 +259,11 @@ export class SyncEngine {
     if (this.stopped) return;
     this.notify({ kind: "task-failed", message: error instanceof Error ? error.message : String(error) });
   }
+}
+
+async function releaseWiring(wiring: Wiring): Promise<void> {
+  await wiring.docs.closeAll();
+  wiring.indexSync.destroy();
+  wiring.indexPersisted.destroy();
+  wiring.indexDoc.destroy();
 }

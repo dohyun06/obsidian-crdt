@@ -41,6 +41,10 @@ export class FakeVault implements VaultPort {
     return () => this.listeners.delete(listener);
   }
 
+  get listenerCount(): number {
+    return this.listeners.size;
+  }
+
   /** A change made outside the plugin: git, another editor, Finder. */
   externalWrite(path: string, text: string): void {
     this.put(path, text);

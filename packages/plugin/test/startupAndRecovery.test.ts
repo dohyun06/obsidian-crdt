@@ -80,6 +80,46 @@ describe("startup scan and bootstrap", () => {
   });
 });
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+describe("stopping while start() is still running (regression: start/stop leak)", () => {
+  it("tears down when stopped while documents are being loaded", async () => {
+    const device = createDevice(new LoopbackHub(), "A");
+    const attach = device.persistence.attach.bind(device.persistence);
+    device.persistence.attach = async (docName, doc) => {
+      await delay(30);
+      return attach(docName, doc);
+    };
+    const starting = device.engine.start();
+    await delay(5);
+    await device.engine.stop();
+    await expect(starting).rejects.toBeInstanceOf(EngineStoppedError);
+    expect(device.syncer.linkCount).toBe(0);
+    expect(device.vault.listenerCount).toBe(0);
+  });
+
+  it("registers no listeners when stopped after the bootstrap flag was read", async () => {
+    const hub = new LoopbackHub();
+    const first = await start(hub, "A", { "a.md": "v1" });
+    await first.engine.stop();
+    running.splice(running.indexOf(first), 1);
+    const device = createDevice(hub, "A", { reuse: first });
+    const getFlag = device.storage.getFlag.bind(device.storage);
+    device.storage.getFlag = async (key) => {
+      await delay(30);
+      return getFlag(key);
+    };
+    const starting = device.engine.start();
+    await delay(5);
+    await device.engine.stop();
+    await expect(starting).rejects.toBeInstanceOf(EngineStoppedError);
+    expect(device.syncer.linkCount).toBe(0);
+    expect(device.vault.listenerCount).toBe(0);
+  });
+});
+
 describe("startup failure isolation and interruption", () => {
   it("keeps scanning when one file fails to read", async () => {
     const hub = new LoopbackHub();
