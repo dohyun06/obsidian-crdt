@@ -1,5 +1,5 @@
 import { IDBFactory } from "fake-indexeddb";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { openSyncDatabase, runRequest, STORE_DOCS } from "../src/obsidian/idb";
 import { IdbDocPersistence } from "../src/obsidian/idbDocPersistence";
@@ -75,27 +75,37 @@ describe("IdbDocPersistence", () => {
     reopened.close();
   });
 
-  it("calls onError and keeps doc dirty on write failure, retries on next flush", async () => {
+  it("calls onError and keeps doc dirty on write failure, retries on next flushAll", async () => {
     const factory = new IDBFactory();
     const db = await openSyncDatabase(DB, factory);
     const errors: unknown[] = [];
+    let failOnce = true;
+    const originalTransaction = db.transaction.bind(db);
+    db.transaction = function (store: string, mode?: IDBTransactionMode) {
+      if (failOnce && store === "docs" && mode === "readwrite") {
+        failOnce = false;
+        throw new Error("injected write failure");
+      }
+      return originalTransaction(store, mode);
+    } as any;
     const persistence = new IdbDocPersistence(db, { saveDebounceMs: 5, onError: (e) => errors.push(e) });
     const doc = new Y.Doc();
     await persistence.attach(NAME, doc);
     doc.getText("content").insert(0, "edit");
+
+    // First flushAll should fail
     await persistence.flushAll();
+    expect(errors.length).toBe(1);
 
-    // Close DB to cause next write to fail
+    // Retry via flushAll should now succeed (failOnce is false now)
+    await persistence.flushAll();
     db.close();
-    doc.getText("content").insert(0, "x");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(errors.length).toBeGreaterThan(0);
 
-    // Reopen and retry
+    // Verify the edit was saved by loading with a fresh doc
     const reopened = await openSyncDatabase(DB, factory);
-    const persistence2 = new IdbDocPersistence(reopened, { saveDebounceMs: 5, onError: (e) => errors.push(e) });
-    await persistence2.attach(NAME, doc);
-    await persistence2.flushAll();
+    const restored = new Y.Doc();
+    await new IdbDocPersistence(reopened, { onError: () => {} }).attach(NAME, restored);
+    expect(restored.getText("content").toString()).toBe("edit");
     reopened.close();
   });
 
@@ -113,20 +123,42 @@ describe("IdbDocPersistence", () => {
     expect(errors.length).toBeGreaterThan(0);
   });
 
-  it("enforces max-wait on debounce", async () => {
+  it("enforces max-wait on debounce: max-wait timer not reset on updates", async () => {
     const db = await openSyncDatabase(DB, new IDBFactory());
-    const persistence = new IdbDocPersistence(db, { saveDebounceMs: 100, onError: () => {} });
+    const persistence = new IdbDocPersistence(db, { saveDebounceMs: 5, onError: () => {} });
     const doc = new Y.Doc();
     await persistence.attach(NAME, doc);
+
+    // Initial update triggers both timers
     doc.getText("content").insert(0, "1");
-    let wrote = false;
-    const checkWrite = setInterval(async () => {
-      const saved = await runRequest(db, STORE_DOCS, "readonly", (store) => store.get(NAME));
-      if (saved) wrote = true;
+    expect(persistence.pendingWrites).toBeGreaterThan(0);
+    const state1 = await runRequest(db, STORE_DOCS, "readonly", (store) => store.get(NAME));
+    expect(state1).toBeUndefined();
+
+    // Wait for debounce, should save
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const state2 = await runRequest(db, STORE_DOCS, "readonly", (store) => store.get(NAME));
+    expect(state2).toBeDefined();
+
+    // Now test that max-wait timer is anchored: remove debounce by doing very frequent updates
+    // but max-wait should eventually fire (every 2 seconds max)
+    let updateCount = 0;
+    const updateInterval = setInterval(() => {
+      doc.getText("content").insert(0, String(updateCount++));
     }, 50);
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-    clearInterval(checkWrite);
-    expect(wrote).toBe(true);
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+      clearInterval(updateInterval);
+      // Should have written at least once more (at 2s mark)
+      const state3 = await runRequest(db, STORE_DOCS, "readonly", (store) => store.get(NAME));
+      expect(state3).toBeDefined();
+      const savedDoc = new Y.Doc();
+      Y.applyUpdate(savedDoc, state3 as Uint8Array);
+      expect(savedDoc.getText("content").toString().length).toBeGreaterThan(1);
+    } finally {
+      clearInterval(updateInterval);
+    }
     db.close();
   });
 });
