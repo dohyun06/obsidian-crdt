@@ -31,6 +31,7 @@ interface PendingDelete {
 export class LocalChangeHandler {
   private readonly pendingDeletes = new Map<string, PendingDelete>();
   private pausedDeletes: PendingDelete[] = [];
+  private readonly oversizeNotified = new Set<string>();
 
   constructor(private readonly deps: LocalChangeDeps) {}
 
@@ -45,7 +46,14 @@ export class LocalChangeHandler {
     if (live && !this.deps.records.get(live.fileId)) return this.adoptRemoteEntry(live.fileId, path);
     const text = await this.deps.vault.read(path);
     if (text === null) return;
-    if (!isWithinSizeLimit(text)) return this.deps.notify({ kind: "file-too-large", path });
+    if (!isWithinSizeLimit(text)) {
+      if (!this.oversizeNotified.has(path)) {
+        this.oversizeNotified.add(path);
+        this.deps.notify({ kind: "file-too-large", path });
+      }
+      return;
+    }
+    this.oversizeNotified.delete(path);
     const renamed = this.takePendingDeleteWithBase(text);
     if (renamed) return this.moveTracked(renamed.fileId, path);
     await this.registerNew(path, text);

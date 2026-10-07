@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import { INDEX_FILES_MAP_KEY, isSafeRelativePath, isValidFileId } from "@obsidian-crdt/shared";
+import { foldPathCase, INDEX_FILES_MAP_KEY, isSafeRelativePath, isValidFileId } from "@obsidian-crdt/shared";
 import { buildConflictPath } from "./conflictPath";
 
 export const INDEX_LOCAL_ORIGIN = Symbol("index-local");
@@ -81,12 +81,13 @@ export class VaultIndex {
   }
 
   planCollisionResolution(): PathReassignment[] {
-    const byPath = new Map<string, IndexEntry[]>();
+    const byFoldedPath = new Map<string, IndexEntry[]>();
     for (const entry of this.liveEntries()) {
-      byPath.set(entry.path, [...(byPath.get(entry.path) ?? []), entry]);
+      const key = foldPathCase(entry.path);
+      byFoldedPath.set(key, [...(byFoldedPath.get(key) ?? []), entry]);
     }
     const plan: PathReassignment[] = [];
-    for (const group of byPath.values()) {
+    for (const group of byFoldedPath.values()) {
       for (const loser of group.slice(1)) {
         const toPath = buildConflictPath({ path: loser.path, label: "conflict", timestampMs: loser.createdAt, fileId: loser.fileId });
         plan.push({ fileId: loser.fileId, fromPath: loser.path, toPath });

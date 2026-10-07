@@ -62,4 +62,28 @@ describe("DocManager", () => {
     await opened.sync.whenSynced();
     expect(opened.sync.isSynced()).toBe(true);
   });
+
+  it("retries opening after a persistence failure and still closes other docs", async () => {
+    const hub = new LoopbackHub();
+    const persistence = new MemoryPersistence();
+    let failNext = true;
+    const flaky = {
+      attach: async (name: string, doc: import("yjs").Doc) => {
+        if (failNext) {
+          failNext = false;
+          throw new Error("storage hiccup");
+        }
+        return persistence.attach(name, doc);
+      },
+    };
+    const docs = new DocManager({ vaultId: VAULT, syncer: new LoopbackSyncer(hub), persistence: flaky, onTextChanged: () => {} });
+    await expect(docs.open(FILE)).rejects.toThrow("storage hiccup");
+    const reopened = await docs.open(FILE);
+    reopened.text.insert(0, "ok");
+    const other = "4f2b8c1e-9a4d-4e7f-8b6a-1c2d3e4f5a6b";
+    failNext = true;
+    await expect(docs.open(other)).rejects.toThrow("storage hiccup");
+    await expect(docs.closeAll()).resolves.toBeUndefined();
+    expect(reopened.doc.isDestroyed).toBe(true);
+  });
 });

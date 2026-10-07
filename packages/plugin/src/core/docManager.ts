@@ -32,16 +32,23 @@ export class DocManager {
   async open(fileId: string): Promise<OpenedDoc> {
     let slot = this.slots.get(fileId);
     if (!slot) {
-      slot = this.createSlot(fileId);
-      this.slots.set(fileId, slot);
+      const created = this.createSlot(fileId);
+      slot = created;
+      this.slots.set(fileId, created);
+      // A failed attach (e.g. a storage hiccup) must not poison this file for the rest of the session.
+      created.catch(() => {
+        if (this.slots.get(fileId) === created) this.slots.delete(fileId);
+      });
     }
     return (await slot).opened;
   }
 
   async closeAll(): Promise<void> {
-    const slots = await Promise.all(this.slots.values());
+    const settled = await Promise.allSettled(this.slots.values());
     this.slots.clear();
-    for (const { opened, persisted } of slots) {
+    for (const result of settled) {
+      if (result.status !== "fulfilled") continue;
+      const { opened, persisted } = result.value;
       opened.sync.destroy();
       persisted.destroy();
       opened.doc.destroy();

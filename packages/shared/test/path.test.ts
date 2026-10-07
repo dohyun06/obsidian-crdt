@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  foldPathCase,
   isSafeRelativePath,
   isSyncablePath,
   isWithinSizeLimit,
@@ -40,5 +41,15 @@ describe("vault paths", () => {
     expect(utf8ByteLength("가")).toBe(3);
     expect(isWithinSizeLimit("a".repeat(MAX_SYNC_FILE_BYTES))).toBe(true);
     expect(isWithinSizeLimit("a".repeat(MAX_SYNC_FILE_BYTES + 1))).toBe(false);
+  });
+
+  it("excludes configured folders regardless of letter case", () => {
+    expect(isSyncablePath(".Obsidian/workspace.md")).toBe(false);
+    expect(isSyncablePath(".TRASH/a.md")).toBe(false);
+    expect(isSyncablePath("Custom-Config/x.md", ["custom-config/"])).toBe(false);
+  });
+
+  it("folds path case for collision checks", () => {
+    expect(foldPathCase("Notes/Note.md")).toBe(foldPathCase("notes/note.md"));
   });
 });

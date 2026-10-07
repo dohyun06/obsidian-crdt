@@ -14,12 +14,18 @@ export function isSafeRelativePath(path: string): boolean {
   return path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
+/** Case-insensitive file systems (macOS, iOS, Windows) treat these paths as the same file. */
+export function foldPathCase(path: string): string {
+  return path.toLowerCase();
+}
+
 /** Expects a normalized path. */
 export function isSyncablePath(path: string, extraExcludedPrefixes: readonly string[] = []): boolean {
   if (!isSafeRelativePath(path)) return false;
   if (!path.toLowerCase().endsWith(SYNCABLE_EXTENSION)) return false;
+  const folded = foldPathCase(path);
   const excluded = [...EXCLUDED_PATH_PREFIXES, ...extraExcludedPrefixes];
-  return !excluded.some((prefix) => path.startsWith(prefix));
+  return !excluded.some((prefix) => folded.startsWith(foldPathCase(prefix)));
 }
 
 export function utf8ByteLength(text: string): number {

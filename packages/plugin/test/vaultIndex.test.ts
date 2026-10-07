@@ -101,4 +101,15 @@ describe("VaultIndex", () => {
     infinityCreated.set("createdAt", Infinity);
     expect(new VaultIndex(doc).entries()).toEqual([]);
   });
+
+  it("treats paths that differ only in letter case as a collision", () => {
+    const docA = new Y.Doc();
+    const docB = new Y.Doc();
+    new VaultIndex(docA, idsFrom(ID_B)).register("Note.md", CREATED);
+    new VaultIndex(docB, idsFrom(ID_A)).register("note.md", CREATED);
+    sync(docA, docB);
+    expect(new VaultIndex(docB).planCollisionResolution()).toEqual([
+      { fileId: ID_B, fromPath: "Note.md", toPath: "Note (conflict 2026-10-07 bbbbbb).md" },
+    ]);
+  });
 });

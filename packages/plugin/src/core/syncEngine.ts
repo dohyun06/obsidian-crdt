@@ -201,9 +201,11 @@ export class SyncEngine {
   }
 
   private route(event: VaultEvent): void {
-    if (this.stopped || this.requireWiring().echoes.consume(event)) return;
-    const path = normalizeVaultPath(event.path);
-    switch (event.type) {
+    if (this.stopped) return;
+    const normalized = normalizeEvent(event);
+    if (this.requireWiring().echoes.consume(normalized)) return;
+    const path = normalized.path;
+    switch (normalized.type) {
       case "create":
         void this.enqueue(({ local }) => local.handleCreate(path));
         return;
@@ -212,7 +214,7 @@ export class SyncEngine {
         return;
       case "rename":
         // A move into an excluded folder becomes a pending delete, so the commit must be scheduled here too.
-        void this.enqueue(({ local }) => local.handleRename(normalizeVaultPath(event.oldPath), path));
+        void this.enqueue(({ local }) => local.handleRename(normalized.oldPath, path));
         this.scheduleDeleteCommit();
         return;
       case "delete":
@@ -266,4 +268,9 @@ async function releaseWiring(wiring: Wiring): Promise<void> {
   wiring.indexSync.destroy();
   wiring.indexPersisted.destroy();
   wiring.indexDoc.destroy();
+}
+
+function normalizeEvent(event: VaultEvent): VaultEvent {
+  if (event.type === "rename") return { ...event, oldPath: normalizeVaultPath(event.oldPath), path: normalizeVaultPath(event.path) };
+  return { ...event, path: normalizeVaultPath(event.path) };
 }

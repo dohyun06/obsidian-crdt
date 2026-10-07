@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { LoopbackHub } from "./fakes/loopback";
-import { type Device, fileDocName, settle, startDevice } from "./fakes/device";
+import { createDevice, type Device, fileDocName, settle, startDevice } from "./fakes/device";
+import { FakeVault } from "./fakes/fakeVault";
+import type { VaultEvent } from "../src/core/ports";
 
 const running: Device[] = [];
 afterEach(async () => {
@@ -251,3 +253,40 @@ describe("SyncEngine — stopping and size limits", () => {
   });
 });
 
+/** Reports event paths with a leading "./", as some platforms do; the engine must still recognise its own echoes. */
+class PrefixingVault extends FakeVault {
+  override onEvent(listener: (event: VaultEvent) => void): () => void {
+    return super.onEvent((event) =>
+      listener(event.type === "rename" ? { ...event, oldPath: `./${event.oldPath}`, path: `./${event.path}` } : { ...event, path: `./${event.path}` }),
+    );
+  }
+}
+
+describe("SyncEngine — hardening", () => {
+  it("recognises its own rename echoes when event paths are not normalized", async () => {
+    const hub = new LoopbackHub();
+    const a = await startDevice(hub, "A");
+    // Device "b" only lends its storage and persistence to the prefixing device.
+    const lender = createDevice(hub, "B");
+    const vaultB = new PrefixingVault();
+    const deviceB = createDevice(hub, "B", { reuse: { ...lender, vault: vaultB } });
+    await deviceB.engine.start();
+    running.push(a, deviceB);
+    for (const [path, text] of [["a.md", "one\n"], ["c.md", "three\n"]] as const) a.vault.externalWrite(path, text);
+    await settle([a, deviceB]);
+    a.vault.externalRename("a.md", "b.md");
+    a.vault.externalRename("c.md", "a.md");
+    await settle([a, deviceB], 12);
+    expect(Object.fromEntries([...vaultB.files.entries()].sort())).toEqual({ "a.md": "three\n", "b.md": "one\n" });
+  });
+
+  it("reports an oversize untracked file once until it fits", async () => {
+    const { a, b } = await pair();
+    const huge = "x".repeat(2 * 1024 * 1024 + 1);
+    a.vault.externalWrite("big.md", huge);
+    await settle([a, b]);
+    a.vault.externalWrite("big.md", `${huge}y`);
+    await settle([a, b]);
+    expect(a.notices.filter((notice) => notice.kind === "file-too-large")).toHaveLength(1);
+  });
+});
