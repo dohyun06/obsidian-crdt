@@ -16,7 +16,8 @@ describe("messages", () => {
     expect(new Set(texts).size).toBe(notices.length);
     expect(texts[1]).toContain("a (conflict-disk 2026-10-08 abcdef).md");
     expect(texts[2]).toContain("big.md");
-    expect(texts[3]).toContain("2");
+    expect(texts[2]).toContain("2MB");
+    expect(texts[3]).toContain("파일 2개");
   });
 
   it("labels every status", () => {

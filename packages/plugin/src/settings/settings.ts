@@ -23,6 +23,10 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 const SECRET_ID_PATTERN = /^[a-z0-9-]+$/;
 const HUE_RANGE = 360;
 
+export function isValidSecretId(id: string): boolean {
+  return SECRET_ID_PATTERN.test(id);
+}
+
 export interface SessionConfig {
   serverUrl: string;
   vaultId: string;
@@ -34,7 +38,9 @@ export type ConfigResult = { ok: true; config: SessionConfig } | { ok: false; pr
 
 function pick<K extends keyof PluginSettings>(raw: Record<string, unknown>, key: K): PluginSettings[K] {
   const value = raw[key];
-  return typeof value === typeof DEFAULT_SETTINGS[key] ? (value as PluginSettings[K]) : DEFAULT_SETTINGS[key];
+  const picked = typeof value === typeof DEFAULT_SETTINGS[key] ? (value as PluginSettings[K]) : DEFAULT_SETTINGS[key];
+  if (key === "deviceName" && typeof picked === "string" && picked.trim() === "") return DEFAULT_SETTINGS[key];
+  return picked;
 }
 
 export function mergeSettings(raw: unknown): PluginSettings {
@@ -53,11 +59,15 @@ export function resolveSessionConfig(settings: PluginSettings, getSecret: (id: s
     problems.push("서버 주소는 wss://로 시작해야 합니다 (ws://는 localhost만 허용).");
   }
   if (!isValidVaultId(settings.vaultId)) problems.push("볼트 ID는 소문자, 숫자, -로 된 8~64자여야 합니다.");
-  const token = SECRET_ID_PATTERN.test(settings.tokenSecretId) ? getSecret(settings.tokenSecretId) : null;
-  if (!SECRET_ID_PATTERN.test(settings.tokenSecretId)) problems.push("토큰 비밀 ID는 소문자, 숫자, -만 쓸 수 있습니다.");
-  else if (!token) problems.push("토큰이 비밀 저장소에 없습니다. 설정에서 토큰을 입력하세요.");
-  if (problems.length > 0 || !token) return { ok: false, problems };
-  return { ok: true, config: { serverUrl: settings.serverUrl, vaultId: settings.vaultId, token, deviceName: settings.deviceName } };
+  if (!isValidSecretId(settings.tokenSecretId)) {
+    problems.push("토큰 비밀 ID는 소문자, 숫자, -만 쓸 수 있습니다.");
+    if (problems.length > 0) return { ok: false, problems };
+  }
+  const secretValue = getSecret(settings.tokenSecretId);
+  const token = secretValue?.trim() ?? null;
+  if (!token) problems.push("토큰이 비밀 저장소에 없습니다. 설정에서 토큰을 입력하세요.");
+  if (problems.length > 0) return { ok: false, problems };
+  return { ok: true, config: { serverUrl: settings.serverUrl, vaultId: settings.vaultId, token: token as string, deviceName: settings.deviceName } };
 }
 
 /** Deterministic cursor color per device name, so collaborators recognise each other across sessions. */

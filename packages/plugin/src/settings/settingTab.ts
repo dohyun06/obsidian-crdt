@@ -1,5 +1,6 @@
-import { type App, type Plugin, PluginSettingTab, SecretComponent, Setting } from "obsidian";
+import { type App, type Plugin, Notice, PluginSettingTab, SecretComponent, Setting } from "obsidian";
 import type { PluginSettings } from "./settings";
+import { isValidSecretId } from "./settings";
 
 export interface SettingsHost {
   settings: PluginSettings;
@@ -22,11 +23,18 @@ export class CrdtSyncSettingTab extends PluginSettingTab {
       Object.assign(settings, change);
       await this.host.saveSettings();
     };
+    const restartWithErrorHandling = async () => {
+      try {
+        await this.host.restartSession();
+      } catch (error) {
+        new Notice(`오류: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
     containerEl.empty();
     new Setting(containerEl).setName("동기화 켜기").addToggle((toggle) =>
       toggle.setValue(settings.enabled).onChange(async (enabled) => {
         await save({ enabled });
-        await this.host.restartSession();
+        await restartWithErrorHandling();
       }),
     );
     new Setting(containerEl).setName("서버 주소").setDesc("wss://로 시작하는 주소").addText((text) =>
@@ -38,13 +46,20 @@ export class CrdtSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("토큰")
       .setDesc("Obsidian 비밀 저장소에 보관됩니다. data.json에는 저장되지 않습니다.")
-      .addComponent((el) => new SecretComponent(this.app, el).setValue(settings.tokenSecretId).onChange((tokenSecretId) => save({ tokenSecretId })));
+      .addComponent((el) => new SecretComponent(this.app, el).setValue(settings.tokenSecretId).onChange((tokenSecretId: string | null) => {
+        const id = tokenSecretId ?? "";
+        if (id && !isValidSecretId(id)) {
+          new Notice("토큰 비밀 ID는 소문자, 숫자, -만 쓸 수 있습니다.");
+          return;
+        }
+        void save({ tokenSecretId: id });
+      }));
     new Setting(containerEl).setName("기기 이름").setDesc("다른 기기에서 커서 옆에 표시됩니다").addText((text) =>
       text.setValue(settings.deviceName).onChange((deviceName) => save({ deviceName: deviceName.trim() || "Obsidian" })),
     );
     new Setting(containerEl).setName("디버그 로그").addToggle((toggle) =>
       toggle.setValue(settings.debugLogging).onChange((debugLogging) => save({ debugLogging })),
     );
-    new Setting(containerEl).addButton((button) => button.setButtonText("적용하고 다시 연결").setCta().onClick(() => void this.host.restartSession()));
+    new Setting(containerEl).addButton((button) => button.setButtonText("적용하고 다시 연결").setCta().onClick(() => void restartWithErrorHandling()));
   }
 }
