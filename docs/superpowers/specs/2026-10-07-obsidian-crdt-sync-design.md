@@ -96,7 +96,8 @@ obsidian-crdt/
 **인덱스 Y.Doc**
 ```
 files: Y.Map<fileId, Y.Map{
-  path: string          // 볼트 기준 상대 경로, NFC 정규화, '/' 구분자
+  path: string          // 볼트 기준 상대 경로, '/' 구분자. 유니코드 정규화(NFC)는 하지 않는다 —
+                        // macOS의 NFD 한글 파일명을 NFC로 바꾸면 디스크 조회(정확 일치)가 실패한다
   deleted: boolean
   createdAt: number     // UTC epoch ms
 }>
