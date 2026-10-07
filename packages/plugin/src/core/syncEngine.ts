@@ -10,6 +10,7 @@ import {
   RENAME_PAIR_WINDOW_MS,
 } from "@obsidian-crdt/shared";
 import { DocManager } from "./docManager";
+import { EchoTrackingVault } from "./echoTrackingVault";
 import { FileReconciler } from "./fileReconciler";
 import { IndexApplier } from "./indexApplier";
 import { LocalChangeHandler } from "./localChanges";
@@ -68,6 +69,7 @@ interface Wiring {
   reconciler: FileReconciler;
   local: LocalChangeHandler;
   applier: IndexApplier;
+  echoes: EchoTrackingVault;
 }
 
 export class SyncEngine {
@@ -106,6 +108,7 @@ export class SyncEngine {
     this.signalStopped();
     for (const dispose of this.disposers.splice(0)) dispose();
     this.debouncer.cancelAll();
+    await this.queue.enqueue(async () => {}); // queued tasks are skipped now; wait for the running one to finish
     const wiring = this.wiring;
     this.wiring = null;
     if (!wiring) return;
@@ -125,15 +128,25 @@ export class SyncEngine {
   }
 
   confirmPausedDeletes(): Promise<void> {
-    return this.queue.enqueue(() => this.requireWiring().local.confirmPausedDeletes());
+    return this.enqueue((wiring) => wiring.local.confirmPausedDeletes());
   }
 
   restorePausedDeletes(): Promise<void> {
-    return this.queue.enqueue(() => this.requireWiring().local.restorePausedDeletes());
+    return this.enqueue((wiring) => wiring.local.restorePausedDeletes());
+  }
+
+  /** Resolves wiring when the task runs, and skips the task once the engine has stopped. */
+  private enqueue(task: (wiring: Wiring) => Promise<void>): Promise<void> {
+    return this.queue.enqueue(async () => {
+      if (this.stopped || !this.wiring) return;
+      await task(this.wiring);
+    });
   }
 
   private async wire(): Promise<Wiring> {
-    const { vaultId, storage, syncer, persistence, vault } = this.deps;
+    const { vaultId, storage, syncer, persistence } = this.deps;
+    const echoes = new EchoTrackingVault(this.deps.vault);
+    const vault = echoes;
     const records = await RecordStore.load(storage);
     const docs = new DocManager({ vaultId, syncer, persistence, onTextChanged: (id) => this.scheduleTextFlush(id) });
     const indexDoc = new Y.Doc();
@@ -146,7 +159,7 @@ export class SyncEngine {
     const guard = new MassDeleteGuard({ threshold: this.timing.massDeleteThreshold, windowMs: this.timing.massDeleteWindowMs, now: this.now });
     const local = new LocalChangeHandler({ vault, index, records, docs, reconciler, guard, now: this.now, notify: this.notify, isEligible, isOpenInEditor: this.isOpenInEditor });
     const applier = new IndexApplier({ vault, index, records, docs, reconciler, isEligible, requestPass: () => this.scheduleIndexPass() });
-    this.wiring = { records, docs, index, indexSync, indexPersisted, indexDoc, reconciler, local, applier };
+    this.wiring = { records, docs, index, indexSync, indexPersisted, indexDoc, reconciler, local, applier, echoes };
     return this.wiring;
   }
 
@@ -157,23 +170,22 @@ export class SyncEngine {
   }
 
   private route(event: VaultEvent): void {
-    if (this.stopped) return;
-    const local = this.requireWiring().local;
+    if (this.stopped || this.requireWiring().echoes.consume(event)) return;
     const path = normalizeVaultPath(event.path);
     switch (event.type) {
       case "create":
-        void this.queue.enqueue(() => local.handleCreate(path));
+        void this.enqueue(({ local }) => local.handleCreate(path));
         return;
       case "modify":
-        void this.queue.enqueue(() => local.handleModify(path));
+        void this.enqueue(({ local }) => local.handleModify(path));
         return;
       case "rename":
         // A move into an excluded folder becomes a pending delete, so the commit must be scheduled here too.
-        void this.queue.enqueue(() => local.handleRename(normalizeVaultPath(event.oldPath), path));
+        void this.enqueue(({ local }) => local.handleRename(normalizeVaultPath(event.oldPath), path));
         this.scheduleDeleteCommit();
         return;
       case "delete":
-        void this.queue.enqueue(async () => local.handleDelete(path));
+        void this.enqueue(async ({ local }) => local.handleDelete(path));
         this.scheduleDeleteCommit();
         return;
     }
@@ -181,19 +193,18 @@ export class SyncEngine {
 
   private scheduleDeleteCommit(): void {
     this.debouncer.schedule("deletes", this.timing.renamePairWindowMs, () => {
-      void this.queue.enqueue(() => this.requireWiring().local.commitPendingDeletes());
+      void this.enqueue(({ local }) => local.commitPendingDeletes());
     });
   }
 
   private scheduleTextFlush(fileId: string): void {
     if (this.stopped) return;
     this.debouncer.schedule(`text:${fileId}`, this.timing.diskWriteDebounceMs, () => {
-      void this.queue.enqueue(() => this.flushRemoteText(fileId));
+      void this.enqueue((wiring) => this.flushRemoteText(wiring, fileId));
     });
   }
 
-  private async flushRemoteText(fileId: string): Promise<void> {
-    const wiring = this.requireWiring();
+  private async flushRemoteText(wiring: Wiring, fileId: string): Promise<void> {
     const record = wiring.records.get(fileId);
     if (!record || this.isOpenInEditor(record.path)) return; // the editor binding owns open files (spec §4.1)
     await wiring.reconciler.reconcile(fileId);
@@ -202,7 +213,7 @@ export class SyncEngine {
   private scheduleIndexPass(): void {
     if (this.stopped) return;
     this.debouncer.schedule("index", this.timing.indexPassDebounceMs, () => {
-      void this.queue.enqueue(() => this.requireWiring().applier.apply());
+      void this.enqueue(({ applier }) => applier.apply());
     });
   }
 

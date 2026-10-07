@@ -1,3 +1,4 @@
+import { isWithinSizeLimit } from "@obsidian-crdt/shared";
 import { buildConflictPath, withCounter } from "./conflictPath";
 import { DISK_ORIGIN, type DocManager, type OpenedDoc } from "./docManager";
 import type { SyncNotice } from "./notices";
@@ -27,6 +28,9 @@ export async function findFreePath(vault: VaultPort, candidate: string): Promise
 
 /** Brings one file's disk text and Y.Text together (spec §4.3). */
 export class FileReconciler {
+  private readonly awaitingSync = new Set<string>();
+  private readonly oversize = new Set<string>();
+
   constructor(private readonly deps: FileReconcilerDeps) {}
 
   async reconcile(fileId: string): Promise<void> {
@@ -36,14 +40,37 @@ export class FileReconciler {
     // Without a base, the local doc may still be empty; seeding it from disk would double the text (spec §4.5).
     // Never block the engine's serial queue while offline: retry once the server state has arrived.
     if (record.base === null && !opened.sync.isSynced()) {
-      void opened.sync.whenSynced().then(() => this.deps.requestRetry(fileId));
+      this.retryWhenSynced(fileId, opened);
       return;
     }
     const disk = await this.deps.vault.read(record.path);
     if (disk === null) return; // missing files are handled by the delete flow
+    if (!this.fitsSizeLimit(fileId, record.path, disk)) return;
     const decision = decideDiskReconcile({ base: record.base, disk, current: opened.text.toString() });
     const settled = await this.apply({ fileId, path: record.path, opened, disk }, decision);
     if (!settled) this.deps.requestRetry(fileId);
+  }
+
+  private retryWhenSynced(fileId: string, opened: OpenedDoc): void {
+    if (this.awaitingSync.has(fileId)) return;
+    this.awaitingSync.add(fileId);
+    void opened.sync.whenSynced().then(() => {
+      this.awaitingSync.delete(fileId);
+      this.deps.requestRetry(fileId);
+    });
+  }
+
+  /** Spec §5: oversize disk text is never pushed into the Y.Text; one notice per oversize episode. */
+  private fitsSizeLimit(fileId: string, path: string, disk: string): boolean {
+    if (isWithinSizeLimit(disk)) {
+      this.oversize.delete(fileId);
+      return true;
+    }
+    if (!this.oversize.has(fileId)) {
+      this.oversize.add(fileId);
+      this.deps.notify({ kind: "file-too-large", path });
+    }
+    return false;
   }
 
   private async apply(target: Target, decision: ReconcileDecision): Promise<boolean> {

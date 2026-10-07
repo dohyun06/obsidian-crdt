@@ -179,3 +179,75 @@ describe("SyncEngine — live changes between two devices", () => {
     expect(b.vault.files.has("draft.md")).toBe(false);
   });
 });
+
+const ATTEMPTS = 10;
+
+function snapshot(device: Device): Record<string, string> {
+  return Object.fromEntries([...device.vault.files.entries()].sort());
+}
+
+describe("SyncEngine — chained and swapped moves", () => {
+  it("applies a rename chain (a to b, c to a) without mixing file contents", async () => {
+    for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+      const { hub, a, b } = await pair();
+      a.vault.externalWrite("a.md", "alpha");
+      a.vault.externalWrite("c.md", "gamma");
+      a.vault.externalWrite("d.md", "delta");
+      await settle([a, b]);
+      const docs = ["a.md", "c.md", "d.md"].map((path) => fileDocName(a, path));
+      a.vault.externalRename("a.md", "b.md");
+      a.vault.externalRename("c.md", "a.md");
+      await settle([a, b]);
+      expect(snapshot(b)).toEqual(snapshot(a));
+      expect(snapshot(b)).toEqual({ "a.md": "gamma", "b.md": "alpha", "d.md": "delta" });
+      expect(docs.map((name) => hub.serverText(name))).toEqual(["alpha", "gamma", "delta"]);
+      expect([...b.vault.files.keys()].some((path) => path.includes("(conflict"))).toBe(false);
+    }
+  });
+
+  it("converges a swap done through a temporary name", async () => {
+    for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+      const { a, b } = await pair();
+      a.vault.externalWrite("a.md", "alpha");
+      a.vault.externalWrite("b.md", "beta");
+      await settle([a, b]);
+      a.vault.externalRename("a.md", "tmp.md");
+      a.vault.externalRename("b.md", "a.md");
+      a.vault.externalRename("tmp.md", "b.md");
+      await settle([a, b]);
+      expect(snapshot(a)).toEqual({ "a.md": "beta", "b.md": "alpha" });
+      expect(snapshot(b)).toEqual({ "a.md": "beta", "b.md": "alpha" });
+    }
+  });
+});
+
+describe("SyncEngine — stopping and size limits", () => {
+  it("does not touch the vault after stop() when events were queued right before it", async () => {
+    const { a, b } = await pair();
+    a.vault.externalWrite("keep.md", "one");
+    await settle([a, b]);
+    const before = snapshot(b);
+    b.vault.externalWrite("late.md", "queued");
+    await Promise.resolve(); // event delivered, task queued
+    await b.engine.stop();
+    const afterStop = snapshot(b);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(snapshot(b)).toEqual(afterStop);
+    expect(Object.keys(before)).toEqual(["keep.md"]);
+  });
+
+  it("stops syncing a tracked file that grows past the limit and resumes once it shrinks", async () => {
+    const { hub, a, b } = await pair();
+    a.vault.externalWrite("grow.md", "small");
+    await settle([a, b]);
+    a.vault.externalWrite("grow.md", "x".repeat(2 * 1024 * 1024 + 1));
+    await settle([a, b]);
+    expect(b.vault.files.get("grow.md")).toBe("small");
+    expect(hub.serverText(fileDocName(a, "grow.md"))).toBe("small");
+    expect(a.notices.filter((notice) => notice.kind === "file-too-large")).toHaveLength(1);
+    a.vault.externalWrite("grow.md", "small again");
+    await settle([a, b]);
+    expect(b.vault.files.get("grow.md")).toBe("small again");
+  });
+});
+
