@@ -19,6 +19,7 @@ import type { SyncNotice } from "./notices";
 import type { DocPersistence, DocSyncer, DocSyncHandle, PersistedDoc, StoragePort, VaultEvent, VaultPort } from "./ports";
 import { RecordStore } from "./recordStore";
 import { KeyedDebouncer, SerialQueue, waitUntil } from "./scheduling";
+import { StartupScan } from "./startupScan";
 import { VaultIndex } from "./vaultIndex";
 
 export const BOOTSTRAP_FLAG = "bootstrapped";
@@ -70,6 +71,7 @@ interface Wiring {
   local: LocalChangeHandler;
   applier: IndexApplier;
   echoes: EchoTrackingVault;
+  scan: StartupScan;
 }
 
 export class SyncEngine {
@@ -99,7 +101,9 @@ export class SyncEngine {
     if (!(await this.deps.storage.getFlag(BOOTSTRAP_FLAG))) await this.waitForFirstSync(wiring.indexSync);
     this.disposers.push(wiring.index.onRemoteChange(() => this.scheduleIndexPass()));
     this.disposers.push(this.deps.vault.onEvent((event) => this.route(event)));
-    this.scheduleIndexPass();
+    await this.enqueue((ready) => ready.scan.run());
+    this.scheduleDeleteCommit();
+    if (this.stopped) throw new EngineStoppedError();
     await this.deps.storage.setFlag(BOOTSTRAP_FLAG, true);
   }
 
@@ -159,7 +163,8 @@ export class SyncEngine {
     const guard = new MassDeleteGuard({ threshold: this.timing.massDeleteThreshold, windowMs: this.timing.massDeleteWindowMs, now: this.now });
     const local = new LocalChangeHandler({ vault, index, records, docs, reconciler, guard, now: this.now, notify: this.notify, isEligible, isOpenInEditor: this.isOpenInEditor });
     const applier = new IndexApplier({ vault, index, records, docs, reconciler, isEligible, requestPass: () => this.scheduleIndexPass() });
-    this.wiring = { records, docs, index, indexSync, indexPersisted, indexDoc, reconciler, local, applier, echoes };
+    const scan = new StartupScan({ vault, records, reconciler, local, applier, isEligible });
+    this.wiring = { records, docs, index, indexSync, indexPersisted, indexDoc, reconciler, local, applier, echoes, scan };
     return this.wiring;
   }
 
