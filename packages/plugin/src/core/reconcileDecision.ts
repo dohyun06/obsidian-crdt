@@ -29,7 +29,9 @@ export function mergeThreeWay(base: string, disk: string, current: string): Merg
 export function decideDiskReconcile({ base, disk, current }: ReconcileInput): ReconcileDecision {
   if (disk === current) return { kind: "in-sync" };
   if (base === null) {
-    return current === "" ? { kind: "merge", text: disk } : { kind: "conflict", keep: current, diskCopy: disk };
+    if (current === "") return { kind: "merge", text: disk };
+    if (disk === "") return { kind: "write-disk", text: current };
+    return { kind: "conflict", keep: current, diskCopy: disk };
   }
   if (disk === base) return { kind: "write-disk", text: current };
   if (current === base) return { kind: "merge", text: disk };

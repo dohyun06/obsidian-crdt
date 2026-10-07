@@ -34,6 +34,13 @@ describe("decideDiskReconcile", () => {
     expect(decideDiskReconcile({ base: null, disk: "local", current: "" })).toEqual({ kind: "merge", text: "local" });
   });
 
+  it("writes the server text when there is no base and the disk is empty (nothing to preserve)", () => {
+    expect(decideDiskReconcile({ base: null, disk: "", current: "server" })).toEqual({
+      kind: "write-disk",
+      text: "server",
+    });
+  });
+
   it("reports a conflict when the disk patch cannot be placed", () => {
     const decision = decideDiskReconcile({
       base: "The quick brown fox jumps over the lazy dog",
@@ -47,6 +54,6 @@ describe("decideDiskReconcile", () => {
 describe("mergeThreeWay", () => {
   it("refuses results with lone surrogates", () => {
     const result = mergeThreeWay("😀", "😁", "😀");
-    if (result.ok) expect(result.text).toBe("😁");
+    expect(result).toEqual({ ok: true, text: "😁" });
   });
 });
