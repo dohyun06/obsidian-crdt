@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SyncEngine } from "../src/core/syncEngine";
 import type { SyncNotice } from "../src/core/notices";
 import { type SessionDeps, type SessionSyncer, SyncSession } from "../src/session/syncSession";
 import type { SyncStatus } from "../src/session/status";
@@ -186,5 +187,62 @@ describe("SyncSession", () => {
     await a.session.restoreDeletes();
     expect(a.session.status).toBe("connected");
     expect(a.session.pausedDeletePaths).toEqual([]);
+  });
+
+  // Fresh device whose server is unreachable: the start waits for a first sync.
+  const offlineSyncer = (hub: LoopbackHub, capture: { syncer?: TestSyncer; failAuth?: () => void }) =>
+    (_config: unknown, handlers: { onAuthFailed(): void }) => {
+      capture.syncer = new TestSyncer(hub, { online: false });
+      capture.failAuth = handlers.onAuthFailed;
+      return capture.syncer;
+    };
+
+  it("auth failure while waiting for the first sync stops the start without the owner", async () => {
+    const capture: { syncer?: TestSyncer; failAuth?: () => void } = {};
+    const a = makeSession(new LoopbackHub(), { createSyncer: offlineSyncer(new LoopbackHub(), capture) as SessionDeps["createSyncer"] });
+    const starting = a.session.start();
+    await settleAll();
+    expect(a.session.status).toBe("waiting-first-sync");
+    expect(a.session.isStarting).toBe(true);
+    capture.failAuth!();
+    await starting;
+    expect(a.session.status).toBe("auth-failed");
+    expect(a.counts.authFailed).toBe(0);
+    expect(capture.syncer!.destroyed).toBe(true);
+    expect(a.log).toEqual(["flush", "close"]);
+  });
+
+  it("stop while waiting for the first sync lets start return and releases everything", async () => {
+    const capture: { syncer?: TestSyncer } = {};
+    const a = makeSession(new LoopbackHub(), { createSyncer: offlineSyncer(new LoopbackHub(), capture) as SessionDeps["createSyncer"] });
+    const starting = a.session.start();
+    await settleAll();
+    await a.session.stop();
+    await starting;
+    expect(a.session.status).toBe("stopped");
+    expect(capture.syncer!.destroyed).toBe(true);
+    expect(a.log).toEqual(["flush", "close"]);
+  });
+
+  it("applies a pause requested before the syncer exists", async () => {
+    const a = makeSession(new LoopbackHub());
+    a.session.pause();
+    const starting = a.session.start(); // a paused fresh device keeps waiting for its first sync
+    await settleAll();
+    expect(a.syncer().paused).toBe(true);
+    await a.session.stop();
+    await starting;
+  });
+
+  it("still closes storage and destroys the syncer when the engine fails to stop, and a later stop retries", async () => {
+    const a = makeSession(new LoopbackHub());
+    await a.session.start();
+    const spy = vi.spyOn(SyncEngine.prototype, "stop").mockRejectedValueOnce(new Error("engine stuck"));
+    await expect(a.session.stop()).rejects.toThrow("engine stuck");
+    expect(a.log).toEqual(["flush", "close"]);
+    expect(a.syncer().destroyed).toBe(true);
+    await a.session.stop();
+    expect(a.session.status).toBe("stopped");
+    spy.mockRestore();
   });
 });

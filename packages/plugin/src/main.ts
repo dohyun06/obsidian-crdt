@@ -50,6 +50,7 @@ export default class CrdtSyncPlugin extends Plugin {
   /** Obsidian does not await onunload, so the final flush on unload is best-effort. */
   async onunload(): Promise<void> {
     this.unloaded = true;
+    void this.abortStarting();
     this.restarting = this.restarting.catch(() => {}).then(() => this.stopSession());
     await this.restarting;
   }
@@ -59,8 +60,16 @@ export default class CrdtSyncPlugin extends Plugin {
   }
 
   restartSession(): Promise<void> {
+    void this.abortStarting();
     this.restarting = this.restarting.catch(() => {}).then(() => this.restart());
     return this.restarting;
+  }
+
+  /** A start blocked on a first sync that cannot happen would block the chain; interrupt it outside the chain. */
+  private async abortStarting(): Promise<void> {
+    const session = this.session;
+    if (!session?.isStarting) return;
+    await this.stopSession();
   }
 
   private setUserPaused(paused: boolean): void {

@@ -45,6 +45,7 @@ export class SyncSession {
   private syncer: SessionSyncer | null = null;
   private connection: ConnectionStatus = "connecting";
   private stopped = false;
+  private pauseRequested = false;
   private stopping: Promise<void> | null = null;
   private pausedPaths: readonly string[] = [];
   private current: SyncStatus = "stopped";
@@ -59,6 +60,11 @@ export class SyncSession {
     return this.stopped ? null : this.engine;
   }
 
+  /** True until start() has finished; a starting session can wait indefinitely for a first sync. */
+  get isStarting(): boolean {
+    return !this.stopped && (this.current === "starting" || this.current === "waiting-first-sync");
+  }
+
   get pausedDeletePaths(): readonly string[] {
     return this.pausedPaths;
   }
@@ -68,7 +74,7 @@ export class SyncSession {
     try {
       await this.startParts();
     } catch (error) {
-      if (error instanceof EngineStoppedError) return;
+      if (error instanceof EngineStoppedError) return void (await this.stopping?.catch(() => {})); // resolve once the stop finished
       const stoppedByOwner = this.stopped;
       await this.stop(); // release storage, syncer and engine
       if (!stoppedByOwner) this.setStatus("error");
@@ -84,6 +90,7 @@ export class SyncSession {
       onAuthFailed: () => this.failAuth(),
       onStatus: (status) => this.onConnection(status),
     });
+    if (this.pauseRequested) this.syncer.pause();
     this.engine = this.createEngine(storage, this.syncer);
     await this.engine.start();
     if (this.current === "starting" || this.current === "waiting-first-sync") this.setStatus(this.connection === "disconnected" ? "offline" : "connected");
@@ -91,30 +98,42 @@ export class SyncSession {
 
   /** Idempotent: every caller resolves only when the first stop has fully finished. */
   stop(): Promise<void> {
-    this.stopping ??= this.release();
+    this.stopping ??= this.release().catch((error) => {
+      this.stopping = null; // a later stop() retries whatever is left
+      throw error;
+    });
     return this.stopping;
   }
 
   private async release(): Promise<void> {
     this.stopped = true;
-    const { engine, storage, syncer } = this;
-    this.engine = null;
-    this.storage = null;
-    this.syncer = null;
-    await engine?.stop();
-    if (storage) {
-      await storage.flush();
-      storage.close();
+    try {
+      await this.engine?.stop();
+      this.engine = null;
+    } finally {
+      await this.releaseStorageAndSyncer();
     }
-    syncer?.destroy();
     if (this.current !== "auth-failed" && this.current !== "error") this.setStatus("stopped");
   }
 
+  private async releaseStorageAndSyncer(): Promise<void> {
+    try {
+      await this.storage?.flush();
+    } finally {
+      this.storage?.close();
+      this.storage = null;
+      this.syncer?.destroy();
+      this.syncer = null;
+    }
+  }
+
   pause(): void {
+    this.pauseRequested = true;
     this.syncer?.pause();
   }
 
   resume(): void {
+    this.pauseRequested = false;
     if (this.current === "auth-failed") return;
     this.syncer?.resume();
   }
@@ -161,8 +180,14 @@ export class SyncSession {
 
   private failAuth(): void {
     if (this.stopped || this.current === "auth-failed") return;
+    const wasStarting = this.isStarting;
     this.setStatus("auth-failed");
     this.syncer?.pause();
+    if (wasStarting) {
+      // The owner's restart chain is blocked on this very start(), so stop directly; start() then returns.
+      this.stop().catch((error) => console.error("CRDT Sync: stopping after auth failure failed", error));
+      return;
+    }
     this.deps.onAuthFailed();
   }
 
