@@ -1,6 +1,6 @@
 import { IDBFactory } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
-import { openSyncDatabase, runRequest, STORE_RECORDS } from "../src/obsidian/idb";
+import { openSyncDatabase, runRequest, STORE_RECORDS, StorageUnavailableError } from "../src/obsidian/idb";
 import { IdbStorage } from "../src/obsidian/idbStorage";
 
 const DB = "crdt-sync/test-vault/test-vault-01";
@@ -34,5 +34,26 @@ describe("IdbStorage", () => {
     await new IdbStorage(db).saveRecord("good", { path: "g.md", base: "g" });
     expect(await new IdbStorage(db).loadRecords()).toEqual([["good", { path: "g.md", base: "g" }]]);
     db.close();
+  });
+
+  it("rejects with StorageUnavailableError when open fails", async () => {
+    const mockFactory = {
+      open: (_name: string, _version?: number) => {
+        const req = Object.create(EventTarget.prototype) as IDBOpenDBRequest;
+        Object.assign(req, {
+          onerror: null as ((this: IDBOpenDBRequest, ev: Event) => unknown) | null,
+          onsuccess: null as ((this: IDBOpenDBRequest, ev: Event) => unknown) | null,
+          onupgradeneeded: null as ((this: IDBOpenDBRequest, ev: IDBVersionChangeEvent) => unknown) | null,
+          onblocked: null as ((this: IDBOpenDBRequest, ev: Event) => unknown) | null,
+          error: new Error("fake error") as unknown,
+          result: null,
+        });
+        setTimeout(() => {
+          if (req.onerror) req.onerror.call(req, new Event("error"));
+        }, 0);
+        return req;
+      },
+    } as IDBFactory;
+    await expect(openSyncDatabase(DB, mockFactory)).rejects.toThrow(StorageUnavailableError);
   });
 });

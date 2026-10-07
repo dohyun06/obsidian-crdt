@@ -18,7 +18,11 @@ export function openSyncDatabase(name: string, factory: IDBFactory): Promise<IDB
     request.onupgradeneeded = () => {
       for (const store of STORES) if (!request.result.objectStoreNames.contains(store)) request.result.createObjectStore(store);
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
     request.onerror = () => reject(new StorageUnavailableError(`cannot open IndexedDB "${name}": ${request.error?.message ?? "unknown error"}`));
     request.onblocked = () => reject(new StorageUnavailableError(`IndexedDB "${name}" is blocked by another connection`));
   });

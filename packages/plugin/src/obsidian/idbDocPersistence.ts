@@ -3,24 +3,27 @@ import type { DocPersistence, PersistedDoc } from "../core/ports";
 import { runRequest, STORE_DOCS } from "./idb";
 
 export const DOC_SAVE_DEBOUNCE_MS = 300;
+export const DOC_SAVE_MAX_WAIT_MS = 2000;
 
 export interface IdbDocPersistenceOptions {
   saveDebounceMs?: number;
-  onError?: (error: unknown) => void;
+  onError: (error: unknown) => void;
 }
 
 interface PendingSave {
   timer: ReturnType<typeof setTimeout>;
+  maxWaitTimer: ReturnType<typeof setTimeout>;
   doc: Y.Doc;
 }
 
 export class IdbDocPersistence implements DocPersistence {
   private readonly pending = new Map<string, PendingSave>();
+  private readonly dirty = new Set<string>();
   private readonly writes = new Set<Promise<void>>();
 
   constructor(
     private readonly db: IDBDatabase,
-    private readonly options: IdbDocPersistenceOptions = {},
+    private readonly options: IdbDocPersistenceOptions,
   ) {}
 
   get pendingWrites(): number {
@@ -42,28 +45,41 @@ export class IdbDocPersistence implements DocPersistence {
     };
   }
 
-  /** Writes every pending save now and waits for all writes; call before closing the database. */
+  /** Writes every pending save now, retries dirty docs once, waits for all writes. */
   async flushAll(): Promise<void> {
     for (const docName of [...this.pending.keys()]) this.flush(docName);
+    for (const docName of [...this.dirty]) this.flush(docName);
     await Promise.allSettled([...this.writes]);
   }
 
   private schedule(docName: string, doc: Y.Doc): void {
     const existing = this.pending.get(docName);
-    if (existing) clearTimeout(existing.timer);
-    const timer = setTimeout(() => this.flush(docName), this.options.saveDebounceMs ?? DOC_SAVE_DEBOUNCE_MS);
-    this.pending.set(docName, { timer, doc });
+    if (existing) {
+      clearTimeout(existing.timer);
+      clearTimeout(existing.maxWaitTimer);
+    }
+    const debounceMs = this.options.saveDebounceMs ?? DOC_SAVE_DEBOUNCE_MS;
+    const timer = setTimeout(() => this.flush(docName), debounceMs);
+    const maxWaitTimer = setTimeout(() => this.flush(docName), DOC_SAVE_MAX_WAIT_MS);
+    this.pending.set(docName, { timer, maxWaitTimer, doc });
+    this.dirty.delete(docName);
   }
 
   private flush(docName: string): void {
     const entry = this.pending.get(docName);
     if (!entry) return;
     clearTimeout(entry.timer);
+    clearTimeout(entry.maxWaitTimer);
     this.pending.delete(docName);
-    const state = Y.encodeStateAsUpdate(entry.doc); // encode now: the doc may be destroyed right after
+    const state = Y.encodeStateAsUpdate(entry.doc);
     const write = runRequest(this.db, STORE_DOCS, "readwrite", (store) => store.put(state, docName))
-      .then(() => undefined)
-      .catch((error: unknown) => this.options.onError?.(error));
+      .then(() => {
+        this.dirty.delete(docName);
+      })
+      .catch((error: unknown) => {
+        this.dirty.add(docName);
+        this.options.onError(error);
+      });
     this.writes.add(write);
     void write.finally(() => this.writes.delete(write));
   }
