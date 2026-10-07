@@ -37,6 +37,13 @@ export class KeyedDebouncer {
     );
   }
 
+  cancel(key: string): void {
+    const existing = this.timers.get(key);
+    if (existing === undefined) return;
+    clearTimeout(existing);
+    this.timers.delete(key);
+  }
+
   cancelAll(): void {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();

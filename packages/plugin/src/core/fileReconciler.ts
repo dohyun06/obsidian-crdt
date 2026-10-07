@@ -53,8 +53,7 @@ export class FileReconciler {
     const base = record.base !== null && disk !== current && this.deps.history.has(fileId, disk) ? disk : record.base;
     const decision = decideDiskReconcile({ base, disk, current });
     const settled = await this.apply({ fileId, path: record.path, opened, disk }, decision);
-    if (!settled) return this.deps.requestRetry(fileId);
-    this.deps.history.forget(fileId);
+    if (!settled) this.deps.requestRetry(fileId);
   }
 
   /**

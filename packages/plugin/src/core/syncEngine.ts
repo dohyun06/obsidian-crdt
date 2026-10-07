@@ -128,9 +128,13 @@ export class SyncEngine {
    */
   notifyEditorClosed(path: string): void {
     const normalized = normalizeVaultPath(path);
+    const closingId = this.wiring?.records.findIdByPath(normalized);
+    if (closingId) this.debouncer.cancel(`snap:${closingId}`);
     void this.enqueue(async (wiring) => {
       const fileId = wiring.records.findIdByPath(normalized);
-      if (fileId) await this.flushRemoteText(wiring, fileId);
+      if (!fileId) return;
+      await this.flushRemoteText(wiring, fileId);
+      if (!this.isOpenInEditor(normalized)) wiring.history.forget(fileId);
     });
   }
 
@@ -140,11 +144,12 @@ export class SyncEngine {
     let result = null as EditorDoc | null;
     await this.enqueue(async ({ records, docs }) => {
       const fileId = records.findIdByPath(normalized);
-      if (!fileId) return;
+      // base === null: not reconciled yet; an editor bound to this Y.Text could wipe the disk (spec §4.5).
+      if (!fileId || records.get(fileId)?.base === null) return;
       const opened = await docs.open(fileId);
       result = { fileId, text: opened.text, awareness: opened.sync.awareness };
     });
-    return result;
+    return this.stopped ? null : result;
   }
 
   /** Remember the current Y.Text of an open file right before the editor saves it (spec §9 close order). */
@@ -157,7 +162,9 @@ export class SyncEngine {
     this.scheduleTextFlush(fileId);
     const record = this.wiring?.records.get(fileId);
     if (!record || this.stopped || !this.isOpenInEditor(record.path)) return;
-    this.debouncer.schedule(`snap:${fileId}`, this.timing.editorSnapshotDebounceMs, () => this.captureSnapshot(fileId));
+    this.debouncer.schedule(`snap:${fileId}`, this.timing.editorSnapshotDebounceMs, () => {
+      if (this.isOpenInEditor(record.path)) this.captureSnapshot(fileId);
+    });
   }
 
   private captureSnapshot(fileId: string): void {
