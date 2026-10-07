@@ -54,6 +54,8 @@ export class FileReconciler {
         return this.writeAndSave(target, decision.text);
       case "conflict":
         await this.saveDiskCopy(target, decision.diskCopy);
+        // Base = the copied text, so a retry after a failed write is a normal merge, not another conflict.
+        await this.saveBase(target, decision.diskCopy);
         return this.writeAndSave(target, decision.keep);
     }
   }
@@ -68,11 +70,16 @@ export class FileReconciler {
     return this.deps.records.set(target.fileId, { path: target.path, base });
   }
 
+  /** Writes the copy until a free path accepts it; the user's disk text must never be lost. */
   private async saveDiskCopy(target: Target, text: string): Promise<void> {
     const candidate = buildConflictPath({ path: target.path, label: "conflict-disk", timestampMs: this.deps.now(), fileId: target.fileId });
-    const copyPath = await findFreePath(this.deps.vault, candidate);
-    await this.deps.vault.replace(copyPath, null, text);
-    this.deps.notify({ kind: "conflict-copy", path: target.path, copyPath });
+    for (;;) {
+      const copyPath = await findFreePath(this.deps.vault, candidate);
+      if (await this.deps.vault.replace(copyPath, null, text)) {
+        this.deps.notify({ kind: "conflict-copy", path: target.path, copyPath });
+        return;
+      }
+    }
   }
 }
 

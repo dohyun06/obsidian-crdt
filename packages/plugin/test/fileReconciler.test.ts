@@ -104,4 +104,51 @@ describe("FileReconciler", () => {
     expect(t.retries).toEqual([FILE]);
     expect(t.vault.files.get("a.md")).toBe("changed underneath");
   });
+
+  it("never loses disk text when the copy path is taken between lookup and write", async () => {
+    const hub = new LoopbackHub();
+    hub.serverDoc(`${VAULT}/${FILE}`).getText("content").insert(0, "server");
+    const t = await setup({ hub, files: { "a.md": "stale" } });
+    await t.records.set(FILE, { path: "a.md", base: null });
+    const copy = "a (conflict-disk 2026-10-07 3f2b8c).md";
+    const originalRead = t.vault.read.bind(t.vault);
+    let raced = false;
+    t.vault.read = async (path) => {
+      const value = await originalRead(path);
+      if (path === copy && value === null && !raced) {
+        raced = true;
+        t.vault.files.set(copy, "someone else");
+      }
+      return value;
+    };
+    await t.reconciler.reconcile(FILE);
+    expect(t.vault.files.get(copy)).toBe("someone else");
+    expect(t.vault.files.get("a (conflict-disk 2026-10-07 3f2b8c) 2.md")).toBe("stale");
+    expect(t.vault.files.get("a.md")).toBe("server");
+    expect(t.notices).toEqual([{ kind: "conflict-copy", path: "a.md", copyPath: "a (conflict-disk 2026-10-07 3f2b8c) 2.md" }]);
+  });
+
+  it("creates exactly one disk copy when the main write fails and is retried", async () => {
+    const hub = new LoopbackHub();
+    hub.serverDoc(`${VAULT}/${FILE}`).getText("content").insert(0, "server");
+    const t = await setup({ hub, files: { "a.md": "stale" } });
+    await t.records.set(FILE, { path: "a.md", base: null });
+    const originalReplace = t.vault.replace.bind(t.vault);
+    let failed = false;
+    t.vault.replace = async (path, expected, next) => {
+      if (path === "a.md" && !failed) {
+        failed = true;
+        return false;
+      }
+      return originalReplace(path, expected, next);
+    };
+    await t.reconciler.reconcile(FILE);
+    expect(t.retries).toEqual([FILE]);
+    await t.reconciler.reconcile(FILE);
+    const copies = [...t.vault.files.keys()].filter((path) => path.includes("conflict-disk"));
+    expect(copies).toHaveLength(1);
+    expect(t.vault.files.get(copies[0] as string)).toBe("stale");
+    expect(t.vault.files.get("a.md")).toBe("server");
+    expect(t.notices).toHaveLength(1);
+  });
 });
