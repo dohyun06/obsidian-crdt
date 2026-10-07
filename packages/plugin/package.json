@@ -1,0 +1,16 @@
+{
+  "name": "@obsidian-crdt/plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@hocuspocus/provider": "^4.7.0",
+    "@obsidian-crdt/shared": "*",
+    "diff-match-patch": "^1.0.5",
+    "yjs": "^13.6.33"
+  },
+  "devDependencies": {
+    "@obsidian-crdt/server": "*",
+    "@types/diff-match-patch": "^1.0.36"
+  }
+}
