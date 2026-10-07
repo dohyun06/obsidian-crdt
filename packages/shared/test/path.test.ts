@@ -52,4 +52,8 @@ describe("vault paths", () => {
   it("folds path case for collision checks", () => {
     expect(foldPathCase("Notes/Note.md")).toBe(foldPathCase("notes/note.md"));
   });
+
+  it("folds Unicode normalization forms for collision checks", () => {
+    expect(foldPathCase("한글.md".normalize("NFD"))).toBe(foldPathCase("한글.md".normalize("NFC")));
+  });
 });

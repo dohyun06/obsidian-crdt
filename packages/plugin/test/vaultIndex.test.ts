@@ -112,4 +112,17 @@ describe("VaultIndex", () => {
       { fileId: ID_B, fromPath: "Note.md", toPath: "Note (conflict 2026-10-07 bbbbbb).md" },
     ]);
   });
+
+  it("treats NFC and NFD spellings of the same name as a collision", () => {
+    const nfc = "한글.md".normalize("NFC");
+    const nfd = "한글.md".normalize("NFD");
+    const docA = new Y.Doc();
+    const docB = new Y.Doc();
+    new VaultIndex(docA, idsFrom(ID_B)).register(nfd, CREATED);
+    new VaultIndex(docB, idsFrom(ID_A)).register(nfc, CREATED);
+    sync(docA, docB);
+    expect(new VaultIndex(docB).planCollisionResolution()).toEqual([
+      { fileId: ID_B, fromPath: nfd, toPath: `${nfd.slice(0, -3)} (conflict 2026-10-07 bbbbbb).md` },
+    ]);
+  });
 });

@@ -14,9 +14,12 @@ export function isSafeRelativePath(path: string): boolean {
   return path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
-/** Case-insensitive file systems (macOS, iOS, Windows) treat these paths as the same file. */
+/**
+ * Comparison key only (stored paths stay unnormalized, spec §3.4): case-insensitive file systems (macOS, iOS,
+ * Windows) treat paths differing in letter case, and on APFS in NFC/NFD form, as the same file.
+ */
 export function foldPathCase(path: string): string {
-  return path.toLowerCase();
+  return path.normalize("NFC").toLowerCase();
 }
 
 /** Expects a normalized path. */
