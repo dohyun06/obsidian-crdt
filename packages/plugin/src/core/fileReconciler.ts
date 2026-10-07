@@ -34,7 +34,11 @@ export class FileReconciler {
     if (!record) return;
     const opened = await this.deps.docs.open(fileId);
     // Without a base, the local doc may still be empty; seeding it from disk would double the text (spec §4.5).
-    if (record.base === null) await opened.sync.whenSynced();
+    // Never block the engine's serial queue while offline: retry once the server state has arrived.
+    if (record.base === null && !opened.sync.isSynced()) {
+      void opened.sync.whenSynced().then(() => this.deps.requestRetry(fileId));
+      return;
+    }
     const disk = await this.deps.vault.read(record.path);
     if (disk === null) return; // missing files are handled by the delete flow
     const decision = decideDiskReconcile({ base: record.base, disk, current: opened.text.toString() });

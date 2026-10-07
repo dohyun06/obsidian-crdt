@@ -80,12 +80,15 @@ describe("FileReconciler", () => {
     hub.serverDoc(`${VAULT}/${FILE}`).getText("content").insert(0, "hello");
     const t = await setup({ hub, files: { "a.md": "hello" }, online: false });
     await t.records.set(FILE, { path: "a.md", base: null });
-    let done = false;
-    const running = t.reconciler.reconcile(FILE).then(() => (done = true));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(done).toBe(false);
+    await t.reconciler.reconcile(FILE); // offline: must not block the caller
+    expect(hub.serverText(`${VAULT}/${FILE}`)).toBe("hello");
+    expect(t.vault.files.get("a.md")).toBe("hello");
+    expect((await t.docs.open(FILE)).text.toString()).toBe("");
+    expect(t.retries).toEqual([]);
     t.syncer.setOnline(true);
-    await running;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(t.retries).toEqual([FILE]);
+    await t.reconciler.reconcile(FILE);
     expect(hub.serverText(`${VAULT}/${FILE}`)).toBe("hello");
     expect(t.vault.files.get("a.md")).toBe("hello");
   });
