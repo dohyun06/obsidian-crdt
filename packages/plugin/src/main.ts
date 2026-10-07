@@ -20,10 +20,13 @@ export default class CrdtSyncPlugin extends Plugin {
   private statusBar: StatusBar | null = null;
   private bridge: EditorBridge | null = null;
   private restarting: Promise<void> = Promise.resolve();
+  private unloaded = false;
+  /** True after the pause command; app visibility/online events must not undo the user's choice. */
+  private userPaused = false;
 
   async onload(): Promise<void> {
     this.settings = mergeSettings(await this.loadData());
-    this.statusBar = new StatusBar(this.addStatusBarItem());
+    this.statusBar = new StatusBar(this.addStatusBarItem(), () => this.reviewPausedDeletes());
     this.bridge = new EditorBridge({
       getSource: () => this.session?.editorSource ?? null,
       getUser: () => ({ name: this.settings.deviceName, ...userColor(this.settings.deviceName) }),
@@ -34,17 +37,21 @@ export default class CrdtSyncPlugin extends Plugin {
     this.registerEditorExtension(this.bridge.extension());
     this.addSettingTab(new CrdtSyncSettingTab(this.app, this));
     this.addCommand({ id: "reconnect", name: "다시 연결", callback: () => void this.restartSession() });
-    this.addCommand({ id: "pause", name: "동기화 일시정지", callback: () => this.session?.pause() });
-    this.addCommand({ id: "resume", name: "동기화 재개", callback: () => this.session?.resume() });
+    this.addCommand({ id: "pause", name: "동기화 일시정지", callback: () => this.setUserPaused(true) });
+    this.addCommand({ id: "resume", name: "동기화 재개", callback: () => this.setUserPaused(false) });
+    this.addCommand({ id: "review-paused-deletions", name: "삭제 확인 창 다시 열기", callback: () => this.reviewPausedDeletes() });
     // Mobile apps suspend sockets in the background; reconnect as soon as the app is visible or online again.
-    this.registerDomEvent(document, "visibilitychange", () => document.visibilityState === "visible" && this.session?.resume());
-    this.registerDomEvent(window, "online", () => this.session?.resume());
+    this.registerDomEvent(document, "visibilitychange", () => document.visibilityState === "visible" && this.resumeUnlessPaused());
+    this.registerDomEvent(window, "online", () => this.resumeUnlessPaused());
     this.registerEvent(this.app.vault.on("rename", () => this.bridge?.rebindAll()));
     this.app.workspace.onLayoutReady(() => void this.restartSession());
   }
 
+  /** Obsidian does not await onunload, so the final flush on unload is best-effort. */
   async onunload(): Promise<void> {
-    await this.stopSession();
+    this.unloaded = true;
+    this.restarting = this.restarting.catch(() => {}).then(() => this.stopSession());
+    await this.restarting;
   }
 
   async saveSettings(): Promise<void> {
@@ -52,12 +59,58 @@ export default class CrdtSyncPlugin extends Plugin {
   }
 
   restartSession(): Promise<void> {
-    this.restarting = this.restarting.then(() => this.restart());
+    this.restarting = this.restarting.catch(() => {}).then(() => this.restart());
     return this.restarting;
   }
 
+  private setUserPaused(paused: boolean): void {
+    this.userPaused = paused;
+    if (paused) this.session?.pause();
+    else this.session?.resume();
+  }
+
+  private resumeUnlessPaused(): void {
+    if (!this.userPaused) this.session?.resume();
+  }
+
+  /** Auth failure arrives mid-session; stopping goes through the same chain so editors detach first. */
+  private stopSessionThroughChain(): void {
+    this.restarting = this.restarting.catch(() => {}).then(() => this.stopSession());
+  }
+
+  private reviewPausedDeletes(): void {
+    const session = this.session;
+    if (session && session.pausedDeletePaths.length > 0) this.openMassDeleteModal(session, [...session.pausedDeletePaths]);
+  }
+
+  private openMassDeleteModal(session: SyncSession, paths: string[]): void {
+    const guarded = (act: (current: SyncSession) => Promise<void>) => async () => {
+      if (this.session !== session) {
+        new Notice("세션이 바뀌었습니다. 다시 열어 주세요.");
+        return;
+      }
+      await act(session);
+    };
+    new MassDeleteModal(this.app, paths, {
+      confirm: guarded((current) => current.confirmDeletes()),
+      restore: guarded((current) => current.restoreDeletes()),
+    }).open();
+  }
+
   private async restart(): Promise<void> {
+    try {
+      await this.restartUnchecked();
+    } catch (error) {
+      console.error("CRDT Sync: restart failed", error);
+      this.statusBar?.render("error");
+      new Notice(`CRDT Sync를 시작하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async restartUnchecked(): Promise<void> {
     await this.stopSession();
+    if (this.unloaded) return;
+    this.userPaused = false;
     if (!this.settings.enabled) return this.statusBar?.render("stopped");
     const result = resolveSessionConfig(this.settings, (id) => this.app.secretStorage.getSecret(id));
     if (!result.ok) {
@@ -69,7 +122,7 @@ export default class CrdtSyncPlugin extends Plugin {
     try {
       await this.session.start();
     } catch (error) {
-      this.statusBar?.render("error");
+      console.error("CRDT Sync: session start failed", error);
       new Notice(`CRDT Sync를 시작하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
     }
     this.bridge?.refreshAll();
@@ -85,6 +138,7 @@ export default class CrdtSyncPlugin extends Plugin {
       excludedPrefixes: [`${this.app.vault.configDir}/`],
       onStatus: (status) => this.statusBar?.render(status),
       onNotice: (notice) => this.showNotice(notice, session),
+      onAuthFailed: () => this.stopSessionThroughChain(),
     });
     return session;
   }
@@ -99,14 +153,20 @@ export default class CrdtSyncPlugin extends Plugin {
     if (this.settings.debugLogging) console.debug("CRDT Sync notice", notice.kind);
     new Notice(noticeMessage(notice));
     if (notice.kind !== "mass-delete-paused") return;
-    new MassDeleteModal(this.app, notice.paths, { confirm: () => session.confirmDeletes(), restore: () => session.restoreDeletes() }).open();
+    this.openMassDeleteModal(session, notice.paths);
   }
 
   private async stopSession(): Promise<void> {
-    await this.bridge?.detachAll(); // needs the running engine for capture/notify
-    const session = this.session;
-    this.session = null;
-    await session?.stop();
+    try {
+      await this.bridge?.detachAll(); // needs the running engine for capture/notify
+    } catch (error) {
+      console.error("CRDT Sync: detaching editors failed", error);
+      new Notice("편집기 저장에 실패했지만 동기화를 중지합니다.");
+    } finally {
+      const session = this.session;
+      this.session = null;
+      await session?.stop();
+    }
   }
 
   private async saveEditor(view: EditorView, path: string): Promise<void> {

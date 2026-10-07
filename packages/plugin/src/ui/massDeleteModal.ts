@@ -1,4 +1,4 @@
-import { type App, Modal, Setting } from "obsidian";
+import { type App, Modal, Notice, Setting } from "obsidian";
 
 export interface MassDeleteChoices {
   confirm(): Promise<void>;
@@ -30,6 +30,9 @@ export class MassDeleteModal extends Modal {
 
   private choose(action: () => Promise<void>): void {
     this.close();
-    void action();
+    action().catch((error) => {
+      console.error("CRDT Sync: mass-delete decision failed", error);
+      new Notice(`삭제 처리에 실패했습니다: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 }

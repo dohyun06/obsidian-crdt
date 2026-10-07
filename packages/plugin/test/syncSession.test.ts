@@ -16,7 +16,9 @@ afterEach(async () => {
 
 class TestSyncer extends LoopbackSyncer implements SessionSyncer {
   destroyed = false;
+  paused = false;
   pause(): void {
+    this.paused = true;
     this.setOnline(false);
   }
   resume(): void {
@@ -33,6 +35,7 @@ function makeSession(hub: LoopbackHub, overrides: Partial<SessionDeps> = {}) {
   const notices: SyncNotice[] = [];
   const vault = new FakeVault();
   const log: string[] = [];
+  const counts = { authFailed: 0 };
   let syncer: TestSyncer | null = null;
   let authFailed: (() => void) | null = null;
   const session = new SyncSession({
@@ -53,11 +56,12 @@ function makeSession(hub: LoopbackHub, overrides: Partial<SessionDeps> = {}) {
     excludedPrefixes: [".obsidian/"],
     onStatus: (status) => statuses.push(status),
     onNotice: (notice) => notices.push(notice),
+    onAuthFailed: () => void (counts.authFailed += 1),
     timing: FAST_TIMING,
     ...overrides,
   });
   sessions.push(session);
-  return { session, vault, statuses, notices, log, syncer: () => syncer!, failAuth: () => authFailed!() };
+  return { session, vault, statuses, notices, log, counts, syncer: () => syncer!, failAuth: () => authFailed!() };
 }
 
 const settleAll = () => new Promise((resolve) => setTimeout(resolve, 100));
@@ -84,13 +88,56 @@ describe("SyncSession", () => {
     expect(a.session.status).toBe("stopped");
   });
 
-  it("reports an authentication failure and stops the engine", async () => {
+  it("reports an authentication failure, pauses the syncer and leaves stopping to the owner", async () => {
     const a = makeSession(new LoopbackHub());
     await a.session.start();
     a.failAuth();
     await settleAll();
     expect(a.session.status).toBe("auth-failed");
+    expect(a.syncer().paused).toBe(true);
+    expect(a.counts.authFailed).toBe(1);
+    expect(a.session.editorSource).not.toBeNull();
+    a.session.resume();
+    expect(a.syncer().paused).toBe(true);
+    await a.session.stop();
+    expect(a.session.status).toBe("auth-failed");
     expect(a.session.editorSource).toBeNull();
+  });
+
+  it("releases everything and reports error when storage cannot be opened", async () => {
+    const a = makeSession(new LoopbackHub(), {
+      openStorage: async () => {
+        throw new Error("idb down");
+      },
+    });
+    await expect(a.session.start()).rejects.toThrow("idb down");
+    expect(a.session.status).toBe("error");
+    expect(a.session.editorSource).toBeNull();
+  });
+
+  it("releases storage and syncer and reports error when the engine fails to start", async () => {
+    const log: string[] = [];
+    const storage = new MemoryStorage();
+    storage.setFlag = async () => {
+      throw new Error("flag write failed");
+    };
+    const a = makeSession(new LoopbackHub(), {
+      openStorage: async () => ({ storage, persistence: new MemoryPersistence(), flush: async () => void log.push("flush"), close: () => void log.push("close") }),
+    });
+    await expect(a.session.start()).rejects.toThrow("flag write failed");
+    expect(a.session.status).toBe("error");
+    expect(log).toEqual(["flush", "close"]);
+    expect(a.syncer().destroyed).toBe(true);
+    expect(a.session.editorSource).toBeNull();
+  });
+
+  it("stop is idempotent: concurrent calls release once and resolve together", async () => {
+    const a = makeSession(new LoopbackHub());
+    await a.session.start();
+    await Promise.all([a.session.stop(), a.session.stop()]);
+    expect(a.log).toEqual(["flush", "close"]);
+    await a.session.stop();
+    expect(a.log).toEqual(["flush", "close"]);
   });
 
   // Review Focus 5
@@ -135,7 +182,9 @@ describe("SyncSession", () => {
     for (const name of ["1", "2", "3", "4", "5"]) a.vault.externalDelete(`${name}.md`);
     await settleAll();
     expect(a.session.status).toBe("deletes-paused");
+    expect(a.session.pausedDeletePaths.length).toBe(5);
     await a.session.restoreDeletes();
     expect(a.session.status).toBe("connected");
+    expect(a.session.pausedDeletePaths).toEqual([]);
   });
 });

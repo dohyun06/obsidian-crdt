@@ -33,6 +33,8 @@ export interface SessionDeps {
   excludedPrefixes: readonly string[];
   onStatus(status: SyncStatus): void;
   onNotice(notice: SyncNotice): void;
+  /** The token was rejected. The session only pauses itself; the owner must stop it (after detaching editors). */
+  onAuthFailed(): void;
   timing?: Partial<SyncTiming>;
 }
 
@@ -43,6 +45,8 @@ export class SyncSession {
   private syncer: SessionSyncer | null = null;
   private connection: ConnectionStatus = "connecting";
   private stopped = false;
+  private stopping: Promise<void> | null = null;
+  private pausedPaths: readonly string[] = [];
   private current: SyncStatus = "stopped";
 
   constructor(private readonly deps: SessionDeps) {}
@@ -55,27 +59,43 @@ export class SyncSession {
     return this.stopped ? null : this.engine;
   }
 
+  get pausedDeletePaths(): readonly string[] {
+    return this.pausedPaths;
+  }
+
   async start(): Promise<void> {
     this.setStatus("starting");
+    try {
+      await this.startParts();
+    } catch (error) {
+      if (error instanceof EngineStoppedError) return;
+      const stoppedByOwner = this.stopped;
+      await this.stop(); // release storage, syncer and engine
+      if (!stoppedByOwner) this.setStatus("error");
+      throw error;
+    }
+  }
+
+  private async startParts(): Promise<void> {
     const storage = await this.deps.openStorage(this.deps.config);
     if (this.stopped) return storage.close(); // stop() ran while storage was opening
     this.storage = storage;
     this.syncer = this.deps.createSyncer(this.deps.config, {
-      onAuthFailed: () => void this.failAuth(),
+      onAuthFailed: () => this.failAuth(),
       onStatus: (status) => this.onConnection(status),
     });
     this.engine = this.createEngine(storage, this.syncer);
-    try {
-      await this.engine.start();
-    } catch (error) {
-      if (error instanceof EngineStoppedError) return;
-      throw error;
-    }
+    await this.engine.start();
     if (this.current === "starting" || this.current === "waiting-first-sync") this.setStatus(this.connection === "disconnected" ? "offline" : "connected");
   }
 
-  async stop(): Promise<void> {
-    if (this.stopped && !this.engine && !this.storage) return;
+  /** Idempotent: every caller resolves only when the first stop has fully finished. */
+  stop(): Promise<void> {
+    this.stopping ??= this.release();
+    return this.stopping;
+  }
+
+  private async release(): Promise<void> {
     this.stopped = true;
     const { engine, storage, syncer } = this;
     this.engine = null;
@@ -87,7 +107,7 @@ export class SyncSession {
       storage.close();
     }
     syncer?.destroy();
-    if (this.current !== "auth-failed") this.setStatus("stopped");
+    if (this.current !== "auth-failed" && this.current !== "error") this.setStatus("stopped");
   }
 
   pause(): void {
@@ -95,6 +115,7 @@ export class SyncSession {
   }
 
   resume(): void {
+    if (this.current === "auth-failed") return;
     this.syncer?.resume();
   }
 
@@ -125,7 +146,10 @@ export class SyncSession {
   private onNotice(notice: SyncNotice): void {
     this.deps.onNotice(notice);
     if (notice.kind === "waiting-for-first-sync") this.setStatus("waiting-first-sync");
-    if (notice.kind === "mass-delete-paused") this.setStatus("deletes-paused");
+    if (notice.kind === "mass-delete-paused") {
+      this.pausedPaths = notice.paths;
+      this.setStatus("deletes-paused");
+    }
   }
 
   private onConnection(status: ConnectionStatus): void {
@@ -135,12 +159,15 @@ export class SyncSession {
     if (status === "disconnected") this.setStatus("offline");
   }
 
-  private async failAuth(): Promise<void> {
+  private failAuth(): void {
+    if (this.stopped || this.current === "auth-failed") return;
     this.setStatus("auth-failed");
-    await this.stop();
+    this.syncer?.pause();
+    this.deps.onAuthFailed();
   }
 
   private leavePausedDeletes(): void {
+    this.pausedPaths = [];
     if (this.current === "deletes-paused") this.setStatus(this.connection === "disconnected" ? "offline" : "connected");
   }
 
