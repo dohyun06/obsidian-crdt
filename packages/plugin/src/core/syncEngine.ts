@@ -1,5 +1,3 @@
-import type { Awareness } from "y-protocols/awareness";
-import type * as Y from "yjs";
 import {
   DISK_WRITE_DEBOUNCE_MS,
   EDITOR_SNAPSHOT_DEBOUNCE_MS,
@@ -9,10 +7,13 @@ import {
   normalizeVaultPath,
   RENAME_PAIR_WINDOW_MS,
 } from "@obsidian-crdt/shared";
+import { type DebugLog, type EditorDoc, EditorAccess } from "./editorAccess";
 import { createWiring, type Wiring } from "./engineWiring";
 import type { SyncNotice } from "./notices";
 import type { DocPersistence, DocSyncer, DocSyncHandle, StoragePort, VaultEvent, VaultPort } from "./ports";
 import { KeyedDebouncer, SerialQueue, waitUntil } from "./scheduling";
+
+export type { DebugLog, EditorDoc } from "./editorAccess";
 
 export const BOOTSTRAP_FLAG = "bootstrapped";
 
@@ -45,6 +46,8 @@ export interface SyncEngineDeps {
   now?: () => number;
   notify?: (notice: SyncNotice) => void;
   timing?: Partial<SyncTiming>;
+  /** Content-free diagnostics (event kinds, paths, fileIds); never note text or tokens. */
+  debug?: DebugLog;
 }
 
 export class EngineStoppedError extends Error {
@@ -54,17 +57,12 @@ export class EngineStoppedError extends Error {
   }
 }
 
-export interface EditorDoc {
-  fileId: string;
-  text: Y.Text;
-  awareness: Awareness | null;
-}
-
 export class SyncEngine {
   private readonly timing: SyncTiming;
   private readonly now: () => number;
   private readonly notify: (notice: SyncNotice) => void;
-  private readonly isOpenInEditor: (path: string) => boolean;
+  private readonly debug: DebugLog;
+  private readonly editors: EditorAccess;
   private readonly queue = new SerialQueue((error) => this.reportFailure(error));
   private readonly debouncer = new KeyedDebouncer();
   private readonly disposers: Array<() => void> = [];
@@ -80,7 +78,17 @@ export class SyncEngine {
     this.timing = { ...DEFAULT_TIMING, ...deps.timing };
     this.now = deps.now ?? Date.now;
     this.notify = deps.notify ?? (() => {});
-    this.isOpenInEditor = deps.isOpenInEditor ?? (() => false);
+    this.debug = deps.debug ?? (() => {});
+    this.editors = new EditorAccess({
+      isPathOpen: deps.isOpenInEditor ?? (() => false),
+      wiring: () => this.wiring,
+      enqueue: (task) => this.enqueue(task),
+      flushRemoteText: (wiring, fileId) => this.flushRemoteText(wiring, fileId),
+      debouncer: this.debouncer,
+      snapshotDebounceMs: this.timing.editorSnapshotDebounceMs,
+      isStopped: () => this.stopped,
+      debug: this.debug,
+    });
   }
 
   async start(): Promise<void> {
@@ -122,55 +130,24 @@ export class SyncEngine {
     return this.enqueue((wiring) => wiring.local.restorePausedDeletes());
   }
 
-  /**
-   * Called by the editor binding when a bound editor closes. Remote edits and modify events were left to the
-   * editor while it was open (spec §4.1); now the disk and Y.Text are brought together again.
-   */
-  notifyEditorClosed(path: string): void {
-    const normalized = normalizeVaultPath(path);
-    const closingId = this.wiring?.records.findIdByPath(normalized);
-    if (closingId) this.debouncer.cancel(`snap:${closingId}`);
-    void this.enqueue(async (wiring) => {
-      const fileId = wiring.records.findIdByPath(normalized);
-      if (!fileId) return;
-      await this.flushRemoteText(wiring, fileId);
-      if (!this.isOpenInEditor(normalized)) wiring.history.forget(fileId);
-    });
+  /** Called by the editor binding when a bound editor closes (see EditorAccess). */
+  notifyEditorClosed(path: string, fileId?: string): void {
+    this.editors.notifyEditorClosed(path, fileId);
   }
 
-  /** The shared Y.Text for a tracked file, after every earlier vault event has been handled. */
-  async openDocForPath(path: string): Promise<EditorDoc | null> {
-    const normalized = normalizeVaultPath(path);
-    let result = null as EditorDoc | null;
-    await this.enqueue(async ({ records, docs }) => {
-      const fileId = records.findIdByPath(normalized);
-      // base === null: not reconciled yet; an editor bound to this Y.Text could wipe the disk (spec §4.5).
-      if (!fileId || records.get(fileId)?.base === null) return;
-      const opened = await docs.open(fileId);
-      result = { fileId, text: opened.text, awareness: opened.sync.awareness };
-    });
-    return this.stopped ? null : result;
+  /** The shared Y.Text for a tracked file; `editorText` (what the editor shows) is merged in first. */
+  openDocForPath(path: string, editorText?: string): Promise<EditorDoc | null> {
+    return this.editors.openDocForPath(path, editorText);
   }
 
   /** Remember the current Y.Text of an open file right before the editor saves it (spec §9 close order). */
-  captureEditorSnapshot(path: string): void {
-    const fileId = this.wiring?.records.findIdByPath(normalizeVaultPath(path));
-    if (fileId) this.captureSnapshot(fileId);
+  captureEditorSnapshot(path: string, fileId?: string): void {
+    this.editors.captureEditorSnapshot(path, fileId);
   }
 
   private onTextChanged(fileId: string): void {
     this.scheduleTextFlush(fileId);
-    const record = this.wiring?.records.get(fileId);
-    if (!record || this.stopped || !this.isOpenInEditor(record.path)) return;
-    this.debouncer.schedule(`snap:${fileId}`, this.timing.editorSnapshotDebounceMs, () => {
-      if (this.isOpenInEditor(record.path)) this.captureSnapshot(fileId);
-    });
-  }
-
-  private captureSnapshot(fileId: string): void {
-    const wiring = this.wiring;
-    const opened = wiring?.docs.peek(fileId);
-    if (wiring && opened) wiring.history.record(fileId, opened.text.toString());
+    this.editors.onTextChanged(fileId);
   }
 
   /** Resolves wiring when the task runs, and skips the task once the engine has stopped. */
@@ -185,7 +162,7 @@ export class SyncEngine {
     this.wiring = await createWiring(this.deps, {
       now: this.now,
       notify: this.notify,
-      isOpenInEditor: this.isOpenInEditor,
+      isOpenInEditor: (fileId, path) => this.editors.isOpen(fileId, path),
       massDelete: { threshold: this.timing.massDeleteThreshold, windowMs: this.timing.massDeleteWindowMs },
       onTextChanged: (id) => this.onTextChanged(id),
       requestRetry: (id) => this.scheduleTextFlush(id),
@@ -220,7 +197,8 @@ export class SyncEngine {
   private route(event: VaultEvent): void {
     if (this.stopped) return;
     const normalized = normalizeEvent(event);
-    if (this.requireWiring().echoes.consume(normalized)) return;
+    if (this.requireWiring().echoes.consume(normalized)) return this.debug("echo-consumed", eventFields(normalized));
+    this.debug("vault-event", eventFields(normalized));
     const path = normalized.path;
     switch (normalized.type) {
       case "create":
@@ -257,7 +235,7 @@ export class SyncEngine {
 
   private async flushRemoteText(wiring: Wiring, fileId: string): Promise<void> {
     const record = wiring.records.get(fileId);
-    if (!record || this.isOpenInEditor(record.path)) return; // the editor binding owns open files (spec §4.1)
+    if (!record || this.editors.isOpen(fileId, record.path)) return; // the editor binding owns open files (spec §4.1)
     await wiring.reconciler.reconcile(fileId);
   }
 
@@ -290,4 +268,8 @@ async function releaseWiring(wiring: Wiring): Promise<void> {
 function normalizeEvent(event: VaultEvent): VaultEvent {
   if (event.type === "rename") return { ...event, oldPath: normalizeVaultPath(event.oldPath), path: normalizeVaultPath(event.path) };
   return { ...event, path: normalizeVaultPath(event.path) };
+}
+
+function eventFields(event: VaultEvent): Record<string, string> {
+  return event.type === "rename" ? { kind: event.type, oldPath: event.oldPath, path: event.path } : { kind: event.type, path: event.path };
 }

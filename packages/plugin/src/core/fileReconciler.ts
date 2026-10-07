@@ -19,6 +19,13 @@ export interface FileReconcilerDeps {
 }
 
 const FIRST_COUNTER = 2;
+/** Origin of editor text merged at bind time; unlike DISK_ORIGIN it is not on disk yet, so it counts as a text change. */
+const EDITOR_TEXT_ORIGIN = Symbol("editor-text");
+
+/** How many files remember the disk text the engine last replaced (see absorbEditorText). */
+export const REPLACED_DISK_TEXTS_LIMIT = 64;
+
+export type AbsorbOutcome = ReconcileDecision["kind"] | "skipped";
 
 export async function findFreePath(vault: VaultPort, candidate: string): Promise<string> {
   if ((await vault.read(candidate)) === null) return candidate;
@@ -32,6 +39,8 @@ export async function findFreePath(vault: VaultPort, candidate: string): Promise
 export class FileReconciler {
   private readonly awaitingSync = new Set<string>();
   private readonly oversize = new Set<string>();
+  /** fileId → the disk text this engine last overwrote; oldest entries are dropped first. */
+  private readonly replacedDiskTexts = new Map<string, string>();
 
   constructor(private readonly deps: FileReconcilerDeps) {}
 
@@ -49,11 +58,33 @@ export class FileReconciler {
     if (disk === null) return; // missing files are handled by the delete flow
     if (!this.fitsSizeLimit(fileId, record.path, disk)) return;
     const current = opened.text.toString();
-    // A disk text the Y.Text already had (a lagging editor save) carries nothing new: it is the real base.
-    const base = record.base !== null && disk !== current && this.deps.history.has(fileId, disk) ? disk : record.base;
-    const decision = decideDiskReconcile({ base, disk, current });
+    const decision = decideDiskReconcile({ base: this.baseFor(fileId, record.base, disk, current), disk, current });
     const settled = await this.apply({ fileId, path: record.path, opened, disk }, decision);
     if (!settled) this.deps.requestRetry(fileId);
+  }
+
+  /**
+   * Text an editor showed before it was bound (typed while unbound, not saved yet) is treated like a disk text that
+   * is not on disk yet. It is merged into the Y.Text like one (spec §4.3), but nothing is written to disk and the
+   * base stays: the bound editor saves the result, and that save becomes the base (acceptEditorSave).
+   * On a conflict the Y.Text is kept and the editor text is saved as a conflict-disk copy, so it is never lost.
+   */
+  async absorbEditorText(fileId: string, editorText: string): Promise<AbsorbOutcome> {
+    const record = this.deps.records.get(fileId);
+    if (!record || record.base === null) return "skipped";
+    const opened = await this.deps.docs.open(fileId);
+    const current = opened.text.toString();
+    const target: Target = { fileId, path: record.path, opened, disk: editorText };
+    if (!isWithinSizeLimit(editorText)) {
+      await this.saveDiskCopy(target, editorText); // spec §5: never pushed into the Y.Text, but never dropped either
+      return "conflict";
+    }
+    // An editor that has not reloaded yet still shows the disk text this engine just replaced: nothing new in it.
+    const base = editorText === this.replacedDiskTexts.get(fileId) ? editorText : this.baseFor(fileId, record.base, editorText, current);
+    const decision = decideDiskReconcile({ base, disk: editorText, current });
+    if (decision.kind === "merge") applyMinimalDiff(opened.text, decision.text, EDITOR_TEXT_ORIGIN);
+    if (decision.kind === "conflict") await this.saveDiskCopy(target, decision.diskCopy);
+    return decision.kind;
   }
 
   /**
@@ -70,6 +101,11 @@ export class FileReconciler {
     if (disk === null || disk === record.base) return;
     if (disk !== opened.text.toString() && !this.deps.history.has(fileId, disk)) return;
     await this.deps.records.set(fileId, { path: record.path, base: disk });
+  }
+
+  /** A disk text the Y.Text already had (a lagging editor save) carries nothing new: it is the real base. */
+  private baseFor(fileId: string, base: string | null, disk: string, current: string): string | null {
+    return base !== null && disk !== current && this.deps.history.has(fileId, disk) ? disk : base;
   }
 
   private retryWhenSynced(fileId: string, opened: OpenedDoc): void {
@@ -113,9 +149,19 @@ export class FileReconciler {
   }
 
   private async writeAndSave(target: Target, next: string): Promise<boolean> {
-    if (next !== target.disk && !(await this.deps.vault.replace(target.path, target.disk, next))) return false;
+    if (next !== target.disk) {
+      if (!(await this.deps.vault.replace(target.path, target.disk, next))) return false;
+      this.rememberReplaced(target.fileId, target.disk);
+    }
     await this.saveBase(target, next);
     return true;
+  }
+
+  private rememberReplaced(fileId: string, text: string): void {
+    this.replacedDiskTexts.delete(fileId);
+    this.replacedDiskTexts.set(fileId, text);
+    const oldest = this.replacedDiskTexts.keys().next();
+    if (this.replacedDiskTexts.size > REPLACED_DISK_TEXTS_LIMIT && !oldest.done) this.replacedDiskTexts.delete(oldest.value);
   }
 
   private saveBase(target: Target, base: string): Promise<void> {

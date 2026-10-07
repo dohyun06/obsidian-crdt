@@ -40,7 +40,8 @@ export interface WiringInputs {
 export interface WiringHooks {
   now: () => number;
   notify: (notice: SyncNotice) => void;
-  isOpenInEditor: (path: string) => boolean;
+  /** Either an editor-open fileId or the editor layer's path signal. */
+  isOpenInEditor: (fileId: string | null, path: string) => boolean;
   massDelete: { threshold: number; windowMs: number };
   onTextChanged: (fileId: string) => void;
   requestRetry: (fileId: string) => void;

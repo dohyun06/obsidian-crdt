@@ -12,21 +12,45 @@ const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 class FakeSource implements EditorDocSource {
   readonly texts = new Map<string, Y.Text>();
   readonly calls: string[] = [];
+  readonly editorTexts: Array<string | undefined> = [];
+  private readonly opens = new Map<string, number>();
+  /** Opens and closes as the engine sees them, in order. */
+  readonly order: string[] = [];
+  /** Runs inside openDocForPath, e.g. to simulate typing while the request is in flight. */
+  duringOpen: (() => void) | null = null;
   track(path: string, content: string): Y.Text {
     const text = new Y.Doc().getText("content");
     text.insert(0, content);
     this.texts.set(path, text);
     return text;
   }
-  async openDocForPath(path: string): Promise<EditorDoc | null> {
+  async openDocForPath(path: string, editorText?: string): Promise<EditorDoc | null> {
+    this.editorTexts.push(editorText);
+    const during = this.duringOpen;
+    this.duringOpen = null;
+    during?.();
     const text = this.texts.get(path);
-    return text ? { fileId: path, text, awareness: null } : null;
+    if (!text) return null;
+    // Stands in for the engine's merge: an unsaved editor text the Y.Text does not have yet is taken over.
+    if (editorText !== undefined && editorText !== text.toString()) {
+      text.delete(0, text.length);
+      text.insert(0, editorText);
+    }
+    this.opens.set(path, this.openCount(path) + 1);
+    this.order.push(`open:${path}`);
+    return { fileId: path, text, awareness: null };
+  }
+  /** Like the engine: every non-null open counts until a close with the same fileId. */
+  openCount(fileId: string): number {
+    return this.opens.get(fileId) ?? 0;
   }
   captureEditorSnapshot(path: string): void {
     this.calls.push(`capture:${path}`);
   }
-  notifyEditorClosed(path: string): void {
+  notifyEditorClosed(path: string, fileId?: string): void {
     this.calls.push(`closed:${path}`);
+    if (fileId) this.opens.set(fileId, this.openCount(fileId) - 1);
+    this.order.push(`closed:${path}`);
   }
 }
 
@@ -108,11 +132,12 @@ describe("EditorBridge", () => {
     first.view.destroy();
     await tick();
     expect(bridge.isOpen("a.md")).toBe(true);
-    expect(source.calls).not.toContain("closed:a.md");
+    expect(source.openCount("a.md")).toBe(1); // the engine still counts the file as open
     views.splice(views.indexOf(second.view), 1);
     second.view.destroy();
     await tick();
-    expect(source.calls.filter((call) => call === "closed:a.md")).toHaveLength(1);
+    expect(source.openCount("a.md")).toBe(0);
+    expect(source.calls.filter((call) => call === "closed:a.md")).toHaveLength(2);
   });
 
   // Review Focus 2
@@ -181,5 +206,56 @@ describe("EditorBridge", () => {
     view.dispatch({ changes: { from: 1, insert: "1" } });
     expect(text.toString()).toBe("x1");
     expect(bridge.isOpen("a.md")).toBe(true);
+  });
+
+  it("keeps text typed while the editor was unbound (regression: attach wiped unsaved text)", async () => {
+    const { source, open } = setup();
+    const text = source.track("a.md", "x");
+    const { view } = open("pending.md", "x");
+    await tick(8); // untracked: the bridge keeps retrying
+    view.dispatch({ changes: { from: 1, insert: " typed while unbound" } }); // not saved yet
+    source.texts.set("pending.md", text);
+    await tick(40);
+    expect(view.state.doc.toString()).toBe("x typed while unbound");
+    expect(text.toString()).toBe("x typed while unbound");
+  });
+
+  it("asks again when the editor text changes while the doc is being opened", async () => {
+    const { source, open } = setup();
+    const text = source.track("a.md", "x");
+    let view: ReturnType<typeof open>["view"] | null = null;
+    source.duringOpen = () => view!.dispatch({ changes: { from: 1, insert: "y" } });
+    view = open("a.md", "x").view;
+    await tick(10);
+    expect(source.editorTexts).toEqual(["x", "xy"]);
+    expect(text.toString()).toBe("xy");
+    expect(view.state.doc.toString()).toBe("xy");
+  });
+
+  it("reports the old path closed only after the renamed note is opened again", async () => {
+    const { source, bridge, open } = setup();
+    const text = source.track("old.md", "body");
+    const { info } = open("old.md", "body");
+    await tick();
+    source.texts.set("new.md", text);
+    info.path = "new.md";
+    bridge.rebindAll();
+    await tick();
+    expect(source.order.indexOf("closed:old.md")).toBeGreaterThan(source.order.indexOf("open:new.md"));
+    expect(source.openCount("old.md")).toBe(0);
+    expect(source.openCount("new.md")).toBe(1);
+  });
+
+  it("reports an opened doc closed again when the binding is abandoned meanwhile", async () => {
+    const { source, bridge, open } = setup();
+    source.track("a.md", "x");
+    let info: { path: string | null } | null = null;
+    source.duringOpen = () => {
+      info!.path = "other.md"; // the pane switched to an untracked file while the doc was being opened
+    };
+    info = open("a.md", "x").info;
+    await tick(10);
+    expect(source.openCount("a.md")).toBe(0);
+    expect(bridge.isOpen("a.md")).toBe(false);
   });
 });

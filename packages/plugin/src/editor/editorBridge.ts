@@ -1,12 +1,14 @@
 import type { Extension } from "@codemirror/state";
 import { type EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
-import type { EditorDoc } from "../core/syncEngine";
+import type { DebugLog, EditorDoc } from "../core/syncEngine";
 import { attachSync, boundPathOf, detachSync, type EditorUser, editorSyncExtension, type FileOf } from "./editorSync";
 
 export interface EditorDocSource {
-  openDocForPath(path: string): Promise<EditorDoc | null>;
-  captureEditorSnapshot(path: string): void;
-  notifyEditorClosed(path: string): void;
+  /** `editorText`: what the editor shows now; text typed while unbound is merged into the Y.Text before binding. */
+  openDocForPath(path: string, editorText?: string): Promise<EditorDoc | null>;
+  captureEditorSnapshot(path: string, fileId?: string): void;
+  /** Balances one non-null openDocForPath result. */
+  notifyEditorClosed(path: string, fileId?: string): void;
 }
 
 export interface EditorBridgeDeps {
@@ -16,15 +18,26 @@ export interface EditorBridgeDeps {
   saveEditor(view: EditorView, path: string): Promise<void>;
   reportError(error: unknown): void;
   retry?: { initialDelayMs: number; maxDelayMs: number };
+  /** Content-free diagnostics: paths and counts only, never note text. */
+  debug?: DebugLog;
 }
 
 /** A new note is registered by the engine a moment after the editor opens it. */
 export const BIND_RETRY = { initialDelayMs: 300, maxDelayMs: 10_000 };
+/** How often a bind asks again when the user keeps typing while the doc is being opened. */
+export const EDITOR_TEXT_REQUESTS = 3;
 
 interface Binding {
   path: string;
   generation: number;
   attached: boolean;
+  /** Set on attach: the engine and doc the editor is bound to, so the close reaches the same engine. */
+  opened?: OpenedFor;
+}
+
+interface OpenedFor {
+  source: EditorDocSource;
+  doc: EditorDoc;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -74,6 +87,7 @@ export class EditorBridge {
 
   /** Re-evaluate every view's file (e.g. after a vault rename, which changes the path without a transaction). */
   rebindAll(): void {
+    this.debug("rebind", { views: this.views.size });
     for (const view of this.views) this.schedule(view);
   }
 
@@ -81,6 +95,7 @@ export class EditorBridge {
     const binding = this.bindings.get(update.view);
     const path = this.deps.fileOf(update.state);
     const guardDetached = binding?.attached === true && boundPathOf(update.state) === null;
+    if (guardDetached) this.debug("guard-drop", { path: binding.path });
     if (path !== (binding?.path ?? null) || guardDetached) this.schedule(update.view);
   }
 
@@ -94,57 +109,108 @@ export class EditorBridge {
     const path = this.deps.fileOf(view.state);
     const binding = this.bindings.get(view);
     if (binding && binding.path === path && (!binding.attached || boundPathOf(view.state) === path)) return;
-    if (binding) await this.release(view, false); // switched or renamed: Obsidian already saved the old file
-    if (path) await this.bind(view, path);
+    // Switched or renamed: Obsidian already saved the old file. The engine hears of the close only after the new
+    // bind has opened its doc, so a renamed note never looks closed in between (a lagging autosave would be merged).
+    const closeOld = binding ? await this.release(view, false, true) : null;
+    if (path) await this.bind(view, path, closeOld);
+    else closeOld?.();
   }
 
-  private async bind(view: EditorView, path: string): Promise<void> {
+  private async bind(view: EditorView, path: string, closeOld: (() => void) | null = null): Promise<void> {
     const generation = ++this.generation;
     this.bindings.set(view, { path, generation, attached: false });
+    this.debug("bind-requested", { path });
     const { initialDelayMs, maxDelayMs } = this.deps.retry ?? BIND_RETRY;
     let delayMs = initialDelayMs;
+    let pendingClose = closeOld;
+    const reportOldClosed = () => {
+      pendingClose?.();
+      pendingClose = null;
+    };
     try {
       // The engine may not track the file yet (startup, first sync): keep retrying while this binding is current.
       while (this.isCurrent(view, generation, path)) {
-        const doc = (await this.deps.getSource()?.openDocForPath(path)) ?? null;
-        if (!this.isCurrent(view, generation, path)) return;
-        if (doc) return this.attach(view, path, doc);
+        const opened = await this.openWithEditorText(view, path);
+        reportOldClosed();
+        if (!this.isCurrent(view, generation, path)) {
+          opened?.source.notifyEditorClosed(path, opened.doc.fileId); // keep the engine's open count balanced
+          break;
+        }
+        if (opened) return this.attach(view, path, opened);
+        this.debug("bind-retry", { path, delayMs });
         await sleep(delayMs);
         delayMs = Math.min(delayMs * 2, maxDelayMs);
       }
+      this.debug("bind-given-up", { path });
     } catch (error) {
       if (this.bindings.get(view)?.generation === generation) this.bindings.delete(view); // never leave a blocking binding
       throw error;
+    } finally {
+      reportOldClosed();
     }
   }
 
-  private attach(view: EditorView, path: string, doc: EditorDoc): void {
-    attachSync(view, { path, text: doc.text, awareness: doc.awareness, user: this.deps.getUser() });
+  /**
+   * Opens the doc with the editor's current text, so text typed while unbound is merged instead of wiped by the
+   * alignment. Asks again (bounded) when the user typed while the request was in flight; every superseded open is
+   * reported closed after the next one, so the engine's open count stays balanced and never drops to zero.
+   */
+  private async openWithEditorText(view: EditorView, path: string): Promise<OpenedFor | null> {
+    const source = this.deps.getSource();
+    if (!source) return null;
+    let opened: OpenedFor | null = null;
+    for (let request = 1; ; request++) {
+      const editorText = view.state.doc.toString();
+      const doc = await source.openDocForPath(path, editorText);
+      if (opened) source.notifyEditorClosed(path, opened.doc.fileId);
+      opened = doc ? { source, doc } : null;
+      if (!opened || view.state.doc.toString() === editorText || request > EDITOR_TEXT_REQUESTS) return opened;
+      this.debug("bind-editor-changed", { path, request });
+    }
+  }
+
+  private attach(view: EditorView, path: string, opened: OpenedFor): void {
+    attachSync(view, { path, text: opened.doc.text, awareness: opened.doc.awareness, user: this.deps.getUser() });
     this.openCounts.set(path, (this.openCounts.get(path) ?? 0) + 1);
     const binding = this.bindings.get(view);
-    if (binding) binding.attached = true;
+    if (binding) {
+      binding.attached = true;
+      binding.opened = opened;
+    }
+    this.debug("bind-attached", { path, fileId: opened.doc.fileId });
   }
 
   private isCurrent(view: EditorView, generation: number, path: string): boolean {
     return !this.paused && this.views.has(view) && this.bindings.get(view)?.generation === generation && this.deps.fileOf(view.state) === path;
   }
 
-  /** Spec §9 close order: capture → save → detach → notify (only when no other pane shows the file). */
-  private async release(view: EditorView, save: boolean): Promise<void> {
+  /**
+   * Spec §9 close order: capture → save → detach → notify. Every attached binding reports its own close (the engine
+   * counts opens per file); with `deferClose` the notify is returned for the caller to run later.
+   */
+  private async release(view: EditorView, save: boolean, deferClose = false): Promise<(() => void) | null> {
     const binding = this.bindings.get(view);
-    if (!binding) return;
+    if (!binding) return null;
     this.bindings.delete(view);
-    if (!binding.attached) return;
-    const source = this.deps.getSource();
-    source?.captureEditorSnapshot(binding.path);
+    if (!binding.attached || !binding.opened) return null;
+    const { source, doc } = binding.opened;
+    const path = binding.path;
+    this.debug("release", { path, save });
+    source.captureEditorSnapshot(path, doc.fileId);
+    const notifyClosed = () => source.notifyEditorClosed(path, doc.fileId);
     try {
-      if (save) await this.deps.saveEditor(view, binding.path);
+      if (save) await this.deps.saveEditor(view, path);
     } finally {
       if (!this.bindings.has(view)) detachSync(view);
-      const remaining = (this.openCounts.get(binding.path) ?? 1) - 1;
-      if (remaining > 0) this.openCounts.set(binding.path, remaining);
-      else this.openCounts.delete(binding.path);
-      if (remaining <= 0) source?.notifyEditorClosed(binding.path);
+      const remaining = (this.openCounts.get(path) ?? 1) - 1;
+      if (remaining > 0) this.openCounts.set(path, remaining);
+      else this.openCounts.delete(path);
+      if (!deferClose) notifyClosed();
     }
+    return deferClose ? notifyClosed : null;
+  }
+
+  private debug(event: string, fields: Record<string, string | number | boolean>): void {
+    this.deps.debug?.(event, fields);
   }
 }
