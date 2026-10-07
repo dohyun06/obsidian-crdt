@@ -32,11 +32,13 @@ docker compose exec sync-server node packages/server/dist/token.js token revoke 
 ```
 
 ## 4. 백업
-문서와 토큰 해시는 `sync-data` 볼륨의 `/app/data/sync.db`에 있다.
+문서와 토큰 해시는 `sync-data` 볼륨의 `/app/data/sync.db`에 있다. 서버가 실행 중이어도 일관된 사본을 얻도록 SQLite의 `VACUUM INTO`로 스냅샷을 만든 뒤 꺼낸다. (DB가 WAL 모드라 파일을 그대로 tar로 묶으면 쓰기 도중의 상태가 담길 수 있다.)
 ```bash
-docker compose exec sync-server node -e "require('node:sqlite')" && \
-docker run --rm -v deploy_sync-data:/data -v "$PWD":/backup busybox tar czf /backup/sync-data.tgz -C /data .
+docker compose exec sync-server node -e "require('node:fs').rmSync('/app/data/backup.db',{force:true});const {DatabaseSync}=require('node:sqlite');new DatabaseSync('/app/data/sync.db').exec(\"VACUUM INTO '/app/data/backup.db'\")"
+docker compose cp sync-server:/app/data/backup.db ./sync-backup.db
+docker compose exec sync-server node -e "require('node:fs').rmSync('/app/data/backup.db')"
 ```
+`./sync-backup.db`는 그 자체로 완결된 SQLite 파일이다. 확인: `sqlite3 sync-backup.db 'PRAGMA integrity_check;'`
 
 ## 5. 보안 메모
 - Hocuspocus는 compose 내부 네트워크에만 열려 있고, 외부는 Caddy(80/443)만 노출된다.

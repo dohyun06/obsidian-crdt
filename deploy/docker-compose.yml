@@ -10,6 +10,11 @@ services:
     volumes:
       - sync-data:/app/data
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:2
@@ -25,6 +30,11 @@ services:
     depends_on:
       - sync-server
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   sync-data: {}
