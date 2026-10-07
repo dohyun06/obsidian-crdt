@@ -25,6 +25,7 @@ class Link {
   private synced: Promise<void> = this.resetSynced();
 
   constructor(
+    readonly docName: string,
     private readonly server: Y.Doc,
     private readonly client: Y.Doc,
   ) {}
@@ -82,7 +83,7 @@ export class LoopbackSyncer implements DocSyncer {
   }
 
   connect(docName: string, doc: Y.Doc): DocSyncHandle {
-    const link = new Link(this.hub.serverDoc(docName), doc);
+    const link = new Link(docName, this.hub.serverDoc(docName), doc);
     this.links.add(link);
     if (this.online) link.up();
     return {
@@ -101,5 +102,14 @@ export class LoopbackSyncer implements DocSyncer {
       if (online) link.up();
       else link.down();
     }
+  }
+
+  /** Connects one document only, e.g. the index arriving before a file's text does. */
+  setDocOnline(docName: string): void {
+    for (const link of this.links) if (link.docName === docName) link.up();
+  }
+
+  get linkCount(): number {
+    return this.links.size;
   }
 }

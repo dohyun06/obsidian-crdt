@@ -30,8 +30,13 @@ describe("decideDiskReconcile", () => {
     });
   });
 
-  it("takes the disk text when there is no base and the server document is empty", () => {
-    expect(decideDiskReconcile({ base: null, disk: "local", current: "" })).toEqual({ kind: "merge", text: "local" });
+  it("keeps an empty server text and copies the disk text when there is no base (regression: empty-doc adoption)", () => {
+    // The creating device may publish the index entry before its text arrives; merging the disk here doubles the text.
+    expect(decideDiskReconcile({ base: null, disk: "local", current: "" })).toEqual({
+      kind: "conflict",
+      keep: "",
+      diskCopy: "local",
+    });
   });
 
   it("writes the server text when there is no base and the disk is empty (nothing to preserve)", () => {

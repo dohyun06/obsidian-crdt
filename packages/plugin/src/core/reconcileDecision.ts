@@ -29,7 +29,8 @@ export function mergeThreeWay(base: string, disk: string, current: string): Merg
 export function decideDiskReconcile({ base, disk, current }: ReconcileInput): ReconcileDecision {
   if (disk === current) return { kind: "in-sync" };
   if (base === null) {
-    if (current === "") return { kind: "merge", text: disk };
+    // Spec §4.3/§4.5: the server text wins even when it is still "" — the creating device may have published the
+    // index entry before its text, and taking the disk text here would double it once that text arrives.
     if (disk === "") return { kind: "write-disk", text: current };
     return { kind: "conflict", keep: current, diskCopy: disk };
   }
