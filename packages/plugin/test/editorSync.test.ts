@@ -95,4 +95,53 @@ describe("editorSync", () => {
       { from: 5, to: 5, insert: "Y" },
     ]);
   });
+
+  it("rebinds after a stale binding without losing sync", () => {
+    const a = yText("A");
+    const b = yText("B");
+    const info = { path: "a.md" as string | null };
+    const view = editor("A", info);
+    attachSync(view, { path: "a.md", text: a, awareness: null, user: USER });
+    info.path = "b.md";
+    attachSync(view, { path: "b.md", text: b, awareness: null, user: USER });
+    type(view, 1, "!");
+    expect(b.toString()).toBe("B!");
+    expect(a.toString()).toBe("A");
+    expect(boundPathOf(view.state)).toBe("b.md");
+  });
+
+  it("destroys the previous undo manager on re-attach", () => {
+    const a = yText("A");
+    const info = { path: "a.md" as string | null };
+    const view = editor("A", info);
+    attachSync(view, { path: "a.md", text: a, awareness: null, user: USER });
+    const listeners = () => a.doc!._observers.get("afterTransaction")?.size ?? 0;
+    const bound = listeners();
+    info.path = "b.md";
+    attachSync(view, { path: "b.md", text: yText("B"), awareness: null, user: USER });
+    detachSync(view);
+    expect(listeners()).toBeLessThan(bound);
+  });
+
+  it("clears the local cursor on detach", () => {
+    const text = yText("abc");
+    const awareness = new Awareness(text.doc!);
+    const view = editor("abc", { path: "a.md" });
+    attachSync(view, { path: "a.md", text, awareness, user: USER });
+    awareness.setLocalStateField("cursor", { anchor: 1, head: 1 });
+    detachSync(view);
+    expect(awareness.getLocalState()?.cursor).toBeNull();
+  });
+
+  it("drops the binding when setState switches files", () => {
+    const text = yText("note A");
+    const info = { path: "a.md" as string | null };
+    const view = editor("note A", info);
+    attachSync(view, { path: "a.md", text, awareness: null, user: USER });
+    info.path = "b.md";
+    view.setState(EditorState.create({ doc: "note B", extensions: [editorSyncExtension(() => info.path)] }));
+    type(view, 0, "x");
+    expect(text.toString()).toBe("note A");
+    expect(boundPathOf(view.state)).toBeNull();
+  });
 });

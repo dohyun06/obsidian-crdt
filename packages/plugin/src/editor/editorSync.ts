@@ -31,6 +31,14 @@ const boundPathField = StateField.define<string | null>({
   },
 });
 const undoManagers = new WeakMap<EditorView, Y.UndoManager>();
+const boundAwareness = new WeakMap<EditorView, Awareness>();
+
+function releaseBinding(view: EditorView): void {
+  undoManagers.get(view)?.destroy();
+  undoManagers.delete(view);
+  boundAwareness.get(view)?.setLocalStateField("cursor", null);
+  boundAwareness.delete(view);
+}
 
 /** Installed once per editor; empty until attachSync binds a Y.Text. */
 export function editorSyncExtension(fileOf: FileOf): Extension {
@@ -42,7 +50,10 @@ export function boundPathOf(state: EditorState): string | null {
 }
 
 export function attachSync(view: EditorView, target: SyncTarget): void {
+  // CodeMirror reuses a ViewPlugin instance across reconfigures (it keeps the old Y.Text), so unbind first.
+  detachSync(view);
   target.awareness?.setLocalStateField("user", target.user);
+  if (target.awareness) boundAwareness.set(view, target.awareness);
   const undoManager = new Y.UndoManager(target.text);
   undoManagers.set(view, undoManager);
   // One transaction: align the editor to the Y.Text and install yCollab together, so the alignment is not
@@ -59,8 +70,7 @@ export function attachSync(view: EditorView, target: SyncTarget): void {
 export function detachSync(view: EditorView): void {
   // A destroyed editor (pane closed) is no longer in the DOM and must not receive transactions.
   if (boundPathOf(view.state) !== null && view.dom.isConnected) view.dispatch({ effects: [syncCompartment.reconfigure([]), setBoundPath.of(null)] });
-  undoManagers.get(view)?.destroy();
-  undoManagers.delete(view);
+  releaseBinding(view);
 }
 
 /**
@@ -70,6 +80,8 @@ export function detachSync(view: EditorView): void {
 function fileSwitchGuard(fileOf: FileOf): Extension {
   return EditorState.transactionExtender.of((transaction: Transaction) => {
     const bound = transaction.startState.field(boundPathField, false) ?? null;
+    // attach/detach transactions decide the binding themselves
+    if (transaction.effects.some((effect) => effect.is(setBoundPath))) return null;
     if (bound === null || fileOf(transaction.startState) === bound) return null;
     return { effects: [syncCompartment.reconfigure([]), setBoundPath.of(null)] };
   });
