@@ -123,14 +123,36 @@ describe("editorSync", () => {
     expect(listeners()).toBeLessThan(bound);
   });
 
-  it("clears the local cursor on detach", () => {
+  it("withdraws the local presence on detach (regression: idle docs renewed awareness every 15 s)", () => {
     const text = yText("abc");
     const awareness = new Awareness(text.doc!);
     const view = editor("abc", { path: "a.md" });
     attachSync(view, { path: "a.md", text, awareness, user: USER });
     awareness.setLocalStateField("cursor", { anchor: 1, head: 1 });
     detachSync(view);
-    expect(awareness.getLocalState()?.cursor).toBeNull();
+    expect(awareness.getLocalState()).toBeNull();
+  });
+
+  it("publishes the user on attach even when the local presence started empty", () => {
+    const text = yText("abc");
+    const awareness = new Awareness(text.doc!);
+    awareness.setLocalState(null); // the syncer withdraws presence for every doc without an editor
+    const view = editor("abc", { path: "a.md" });
+    attachSync(view, { path: "a.md", text, awareness, user: USER });
+    expect(awareness.getLocalState()).toEqual({ user: USER });
+  });
+
+  it("keeps the presence while another view still shows the file", () => {
+    const text = yText("abc");
+    const awareness = new Awareness(text.doc!);
+    const first = editor("abc", { path: "a.md" });
+    const second = editor("abc", { path: "a.md" });
+    attachSync(first, { path: "a.md", text, awareness, user: USER });
+    attachSync(second, { path: "a.md", text, awareness, user: USER });
+    detachSync(first);
+    expect(awareness.getLocalState()?.user).toEqual(USER);
+    detachSync(second);
+    expect(awareness.getLocalState()).toBeNull();
   });
 
   it("drops the binding when setState switches files", () => {

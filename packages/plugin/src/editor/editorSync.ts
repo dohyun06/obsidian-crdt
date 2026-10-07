@@ -32,12 +32,38 @@ const boundPathField = StateField.define<string | null>({
 });
 const undoManagers = new WeakMap<EditorView, Y.UndoManager>();
 const boundAwareness = new WeakMap<EditorView, Awareness>();
+/** How many bound views share one awareness (several panes can show the same file). */
+const awarenessViews = new WeakMap<Awareness, number>();
+
+/**
+ * The whole local state is set, not one field: the syncer starts every doc with no presence (null state), and
+ * setLocalStateField is a no-op on a null state.
+ */
+function claimPresence(view: EditorView, awareness: Awareness, user: EditorUser): void {
+  awareness.setLocalState({ user });
+  boundAwareness.set(view, awareness);
+  awarenessViews.set(awareness, (awarenessViews.get(awareness) ?? 0) + 1);
+}
+
+/** The last view to leave withdraws the presence (null state: nothing is renewed or sent for an idle doc). */
+function releasePresence(view: EditorView): void {
+  const awareness = boundAwareness.get(view);
+  if (!awareness) return;
+  boundAwareness.delete(view);
+  const remaining = (awarenessViews.get(awareness) ?? 1) - 1;
+  if (remaining > 0) {
+    awarenessViews.set(awareness, remaining);
+    awareness.setLocalStateField("cursor", null);
+    return;
+  }
+  awarenessViews.delete(awareness);
+  awareness.setLocalState(null);
+}
 
 function releaseBinding(view: EditorView): void {
   undoManagers.get(view)?.destroy();
   undoManagers.delete(view);
-  boundAwareness.get(view)?.setLocalStateField("cursor", null);
-  boundAwareness.delete(view);
+  releasePresence(view);
 }
 
 /** Installed once per editor; empty until attachSync binds a Y.Text. */
@@ -52,8 +78,7 @@ export function boundPathOf(state: EditorState): string | null {
 export function attachSync(view: EditorView, target: SyncTarget): void {
   // CodeMirror reuses a ViewPlugin instance across reconfigures (it keeps the old Y.Text), so unbind first.
   detachSync(view);
-  target.awareness?.setLocalStateField("user", target.user);
-  if (target.awareness) boundAwareness.set(view, target.awareness);
+  if (target.awareness) claimPresence(view, target.awareness, target.user);
   const undoManager = new Y.UndoManager(target.text);
   undoManagers.set(view, undoManager);
   // One transaction: align the editor to the Y.Text and install yCollab together, so the alignment is not
