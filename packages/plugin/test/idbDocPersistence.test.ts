@@ -123,42 +123,31 @@ describe("IdbDocPersistence", () => {
     expect(errors.length).toBeGreaterThan(0);
   });
 
-  it("enforces max-wait on debounce: max-wait timer not reset on updates", async () => {
+  it("saves within the max-wait even while updates keep arriving", async () => {
     const db = await openSyncDatabase(DB, new IDBFactory());
-    const persistence = new IdbDocPersistence(db, { saveDebounceMs: 5, onError: () => {} });
+    const writes: string[] = [];
+    const original = db.transaction.bind(db);
+    db.transaction = ((stores: string | string[], mode?: IDBTransactionMode) => {
+      if (mode === "readwrite") writes.push(String(stores));
+      return original(stores as string, mode);
+    }) as typeof db.transaction;
+    const persistence = new IdbDocPersistence(db, { saveDebounceMs: 300, onError: () => {} });
     const doc = new Y.Doc();
     await persistence.attach(NAME, doc);
-
-    // Initial update triggers both timers
-    doc.getText("content").insert(0, "1");
-    expect(persistence.pendingWrites).toBeGreaterThan(0);
-    const state1 = await runRequest(db, STORE_DOCS, "readonly", (store) => store.get(NAME));
-    expect(state1).toBeUndefined();
-
-    // Wait for debounce, should save
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    const state2 = await runRequest(db, STORE_DOCS, "readonly", (store) => store.get(NAME));
-    expect(state2).toBeDefined();
-
-    // Now test that max-wait timer is anchored: remove debounce by doing very frequent updates
-    // but max-wait should eventually fire (every 2 seconds max)
-    let updateCount = 0;
-    const updateInterval = setInterval(() => {
-      doc.getText("content").insert(0, String(updateCount++));
-    }, 50);
-
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      await new Promise((resolve) => setTimeout(resolve, 2200));
-      clearInterval(updateInterval);
-      // Should have written at least once more (at 2s mark)
-      const state3 = await runRequest(db, STORE_DOCS, "readonly", (store) => store.get(NAME));
-      expect(state3).toBeDefined();
-      const savedDoc = new Y.Doc();
-      Y.applyUpdate(savedDoc, state3 as Uint8Array);
-      expect(savedDoc.getText("content").toString().length).toBeGreaterThan(1);
+      for (let elapsed = 0; elapsed < 1900; elapsed += 100) {
+        doc.getText("content").insert(0, "x");
+        vi.advanceTimersByTime(100);
+      }
+      expect(writes).toHaveLength(0);
+      doc.getText("content").insert(0, "x");
+      vi.advanceTimersByTime(200);
+      expect(writes).toHaveLength(1);
     } finally {
-      clearInterval(updateInterval);
+      vi.useRealTimers();
     }
+    await persistence.flushAll();
     db.close();
   });
 });

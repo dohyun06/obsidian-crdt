@@ -12,7 +12,7 @@ export interface IdbDocPersistenceOptions {
 
 interface PendingSave {
   timer: ReturnType<typeof setTimeout>;
-  maxWaitTimer: ReturnType<typeof setTimeout> | null;
+  maxWaitTimer: ReturnType<typeof setTimeout>;
   doc: Y.Doc;
 }
 
@@ -68,7 +68,7 @@ export class IdbDocPersistence implements DocPersistence {
     const entry = this.pending.get(docName);
     if (!entry) return;
     clearTimeout(entry.timer);
-    if (entry.maxWaitTimer) clearTimeout(entry.maxWaitTimer);
+    clearTimeout(entry.maxWaitTimer);
     this.pending.delete(docName);
     this.writeDoc(docName, entry.doc);
   }
