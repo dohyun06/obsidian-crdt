@@ -14,11 +14,12 @@ export interface EditorBridgeDeps {
   getUser(): EditorUser;
   fileOf: FileOf;
   saveEditor(view: EditorView, path: string): Promise<void>;
-  retry?: { attempts: number; delayMs: number };
+  reportError(error: unknown): void;
+  retry?: { initialDelayMs: number; maxDelayMs: number };
 }
 
 /** A new note is registered by the engine a moment after the editor opens it. */
-export const BIND_RETRY = { attempts: 10, delayMs: 300 };
+export const BIND_RETRY = { initialDelayMs: 300, maxDelayMs: 10_000 };
 
 interface Binding {
   path: string;
@@ -48,7 +49,7 @@ export class EditorBridge {
           update: (update: ViewUpdate) => this.onUpdate(update),
           destroy: () => {
             this.views.delete(view);
-            void this.release(view, true);
+            this.release(view, true).catch((error) => this.deps.reportError(error));
           },
         };
       }),
@@ -68,6 +69,11 @@ export class EditorBridge {
   /** After a session starts: bind every open editor again. */
   refreshAll(): void {
     this.paused = false;
+    this.rebindAll();
+  }
+
+  /** Re-evaluate every view's file (e.g. after a vault rename, which changes the path without a transaction). */
+  rebindAll(): void {
     for (const view of this.views) this.schedule(view);
   }
 
@@ -80,7 +86,7 @@ export class EditorBridge {
 
   /** Never dispatch inside a CodeMirror update: defer to a microtask. */
   private schedule(view: EditorView): void {
-    queueMicrotask(() => void this.sync(view));
+    queueMicrotask(() => this.sync(view).catch((error) => this.deps.reportError(error)));
   }
 
   private async sync(view: EditorView): Promise<void> {
@@ -95,13 +101,20 @@ export class EditorBridge {
   private async bind(view: EditorView, path: string): Promise<void> {
     const generation = ++this.generation;
     this.bindings.set(view, { path, generation, attached: false });
-    const { attempts, delayMs } = this.deps.retry ?? BIND_RETRY;
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      const doc = (await this.deps.getSource()?.openDocForPath(path)) ?? null;
-      if (!this.isCurrent(view, generation, path)) return;
-      if (doc) return this.attach(view, path, doc);
-      await sleep(delayMs);
-      if (!this.isCurrent(view, generation, path)) return;
+    const { initialDelayMs, maxDelayMs } = this.deps.retry ?? BIND_RETRY;
+    let delayMs = initialDelayMs;
+    try {
+      // The engine may not track the file yet (startup, first sync): keep retrying while this binding is current.
+      while (this.isCurrent(view, generation, path)) {
+        const doc = (await this.deps.getSource()?.openDocForPath(path)) ?? null;
+        if (!this.isCurrent(view, generation, path)) return;
+        if (doc) return this.attach(view, path, doc);
+        await sleep(delayMs);
+        delayMs = Math.min(delayMs * 2, maxDelayMs);
+      }
+    } catch (error) {
+      if (this.bindings.get(view)?.generation === generation) this.bindings.delete(view); // never leave a blocking binding
+      throw error;
     }
   }
 
@@ -113,7 +126,7 @@ export class EditorBridge {
   }
 
   private isCurrent(view: EditorView, generation: number, path: string): boolean {
-    return this.views.has(view) && this.bindings.get(view)?.generation === generation && this.deps.fileOf(view.state) === path;
+    return !this.paused && this.views.has(view) && this.bindings.get(view)?.generation === generation && this.deps.fileOf(view.state) === path;
   }
 
   /** Spec §9 close order: capture → save → detach → notify (only when no other pane shows the file). */
@@ -127,7 +140,7 @@ export class EditorBridge {
     try {
       if (save) await this.deps.saveEditor(view, binding.path);
     } finally {
-      detachSync(view);
+      if (!this.bindings.has(view)) detachSync(view);
       const remaining = (this.openCounts.get(binding.path) ?? 1) - 1;
       if (remaining > 0) this.openCounts.set(binding.path, remaining);
       else this.openCounts.delete(binding.path);

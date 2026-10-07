@@ -36,6 +36,7 @@ afterEach(() => views.splice(0).forEach((view) => view.destroy()));
 function setup() {
   const source = new FakeSource();
   const files = new Map<EditorView, { path: string | null }>();
+  const errors: unknown[] = [];
   const bridge = new EditorBridge({
     getSource: () => source,
     getUser: () => USER,
@@ -43,7 +44,8 @@ function setup() {
     saveEditor: async (_view, path) => {
       source.calls.push(`save:${path}`);
     },
-    retry: { attempts: 5, delayMs: 5 },
+    reportError: (error) => errors.push(error),
+    retry: { initialDelayMs: 5, maxDelayMs: 20 },
   });
   let pendingPath: string | null = null;
   const open = (path: string, content: string) => {
@@ -54,7 +56,7 @@ function setup() {
     views.push(view);
     return { view, info };
   };
-  return { source, bridge, open };
+  return { source, bridge, open, errors };
 }
 
 describe("EditorBridge", () => {
@@ -135,12 +137,35 @@ describe("EditorBridge", () => {
     await tick();
     source.texts.set("new.md", text);
     info.path = "new.md";
-    view.dispatch({ selection: { anchor: 0 } }); // any transaction; the guard notices the path change
+    bridge.rebindAll(); // the vault rename event: no editor transaction accompanies the path change
     await tick();
     view.dispatch({ changes: { from: 4, insert: "!" } });
     expect(text.toString()).toBe("body!");
     expect(bridge.isOpen("new.md")).toBe(true);
     expect(bridge.isOpen("old.md")).toBe(false);
+  });
+
+  it("binds a file tracked only after many retries", async () => {
+    const { source, bridge, open } = setup();
+    const { view } = open("slow.md", "");
+    await tick(120); // far beyond a fixed attempt count at 5-20 ms
+    const text = source.track("slow.md", "");
+    await tick(60);
+    view.dispatch({ changes: { from: 0, insert: "ok" } });
+    expect(text.toString()).toBe("ok");
+    expect(bridge.isOpen("slow.md")).toBe(true);
+  });
+
+  it("refreshAll after a long-unbound editor binds it once tracked", async () => {
+    const { source, bridge, open, errors } = setup();
+    const { view } = open("late.md", "");
+    await tick(60);
+    const text = source.track("late.md", "");
+    bridge.refreshAll();
+    await tick(40);
+    view.dispatch({ changes: { from: 0, insert: "y" } });
+    expect(text.toString()).toBe("y");
+    expect(errors).toEqual([]);
   });
 
   it("detaches every editor for a session restart and binds them again", async () => {
