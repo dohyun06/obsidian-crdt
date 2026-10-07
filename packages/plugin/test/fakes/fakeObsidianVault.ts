@@ -1,3 +1,4 @@
+import { foldPathCase } from "@obsidian-crdt/shared";
 import type { ObsidianFileLike, ObsidianVaultLike, VaultEventRef } from "../../src/obsidian/vaultAdapter";
 
 class FakeFile implements ObsidianFileLike {
@@ -23,14 +24,25 @@ function parentOf(path: string): string {
 
 /** Behaves like Obsidian's Vault where the adapter depends on it: async events, strict create/createFolder. */
 export class FakeObsidianVault implements ObsidianVaultLike {
+  /** Keyed by key(path); each file keeps the spelling it was stored with. */
   readonly files = new Map<string, FakeFile>();
   readonly folders = new Set<string>();
   readonly trashed: Array<{ path: string; system: boolean }> = [];
   private readonly handlers = new Map<string, Set<Handler>>();
 
+  /** Map key for a path; a case-sensitive file system uses the path itself. */
+  protected key(path: string): string {
+    return path;
+  }
+
   seed(path: string, data: string): void {
-    for (let parent = parentOf(path); parent; parent = parentOf(parent)) this.folders.add(parent);
-    this.files.set(path, new FakeFile(path, data));
+    for (let parent = parentOf(path); parent; parent = parentOf(parent)) this.folders.add(this.key(parent));
+    this.files.set(this.key(path), new FakeFile(path, data));
+  }
+
+  /** The stored file at `path` (compared like the file system compares names). */
+  fileAt(path: string): FakeFile | undefined {
+    return this.files.get(this.key(path));
   }
 
   getMarkdownFiles(): ObsidianFileLike[] {
@@ -38,7 +50,7 @@ export class FakeObsidianVault implements ObsidianVaultLike {
   }
 
   getAbstractFileByPath(path: string): ObsidianFileLike | null {
-    return this.files.get(path) ?? (this.folders.has(path) ? new FakeFolder(path) : null);
+    return this.files.get(this.key(path)) ?? (this.folders.has(this.key(path)) ? new FakeFolder(path) : null);
   }
 
   async read(file: ObsidianFileLike): Promise<string> {
@@ -47,9 +59,9 @@ export class FakeObsidianVault implements ObsidianVaultLike {
 
   async create(path: string, data: string): Promise<ObsidianFileLike> {
     if (this.getAbstractFileByPath(path)) throw new Error("File already exists.");
-    if (parentOf(path) && !this.folders.has(parentOf(path))) throw new Error("Parent folder does not exist.");
+    if (parentOf(path) && !this.folders.has(this.key(parentOf(path)))) throw new Error("Parent folder does not exist.");
     const file = new FakeFile(path, data);
-    this.files.set(path, file);
+    this.files.set(this.key(path), file);
     this.emit("create", file);
     return file;
   }
@@ -65,26 +77,27 @@ export class FakeObsidianVault implements ObsidianVaultLike {
   }
 
   async rename(file: ObsidianFileLike, newPath: string): Promise<void> {
-    if (this.getAbstractFileByPath(newPath)) throw new Error("Destination file already exists!");
     const oldPath = file.path;
-    if (this.folders.has(oldPath)) return this.renameFolder(oldPath, newPath);
-    const target = this.files.get(oldPath)!;
-    this.files.delete(oldPath);
+    const caseOnly = this.key(oldPath) === this.key(newPath) && oldPath !== newPath;
+    if (!caseOnly && this.getAbstractFileByPath(newPath)) throw new Error("Destination file already exists!");
+    if (this.folders.has(this.key(oldPath))) return this.renameFolder(oldPath, newPath);
+    const target = this.files.get(this.key(oldPath))!;
+    this.files.delete(this.key(oldPath));
     target.path = newPath;
-    this.files.set(newPath, target);
+    this.files.set(this.key(newPath), target);
     this.emit("rename", target, oldPath);
   }
 
   async trash(file: ObsidianFileLike, system: boolean): Promise<void> {
-    this.files.delete(file.path);
+    this.files.delete(this.key(file.path));
     this.trashed.push({ path: file.path, system });
     this.emit("delete", file);
   }
 
   async createFolder(path: string): Promise<ObsidianFileLike> {
     if (this.getAbstractFileByPath(path)) throw new Error("Folder already exists.");
-    if (parentOf(path) && !this.folders.has(parentOf(path))) throw new Error("Parent folder does not exist.");
-    this.folders.add(path);
+    if (parentOf(path) && !this.folders.has(this.key(parentOf(path)))) throw new Error("Parent folder does not exist.");
+    this.folders.add(this.key(path));
     const folder = new FakeFolder(path);
     this.emit("create", folder);
     return folder;
@@ -104,18 +117,18 @@ export class FakeObsidianVault implements ObsidianVaultLike {
 
   /** A user edit made in Obsidian outside the plugin. */
   userModify(path: string, data: string): void {
-    const file = this.files.get(path)!;
+    const file = this.files.get(this.key(path))!;
     file.data = data;
     this.emit("modify", file);
   }
 
   private renameFolder(oldPath: string, newPath: string): void {
-    this.folders.delete(oldPath);
-    this.folders.add(newPath);
-    for (const file of [...this.files.values()].filter((entry) => entry.path.startsWith(`${oldPath}/`))) {
-      this.files.delete(file.path);
+    this.folders.delete(this.key(oldPath));
+    this.folders.add(this.key(newPath));
+    for (const file of [...this.files.values()].filter((entry) => this.key(entry.path).startsWith(this.key(`${oldPath}/`)))) {
+      this.files.delete(this.key(file.path));
       file.path = `${newPath}${file.path.slice(oldPath.length)}`;
-      this.files.set(file.path, file);
+      this.files.set(this.key(file.path), file);
     }
     this.emit("rename", new FakeFolder(newPath), oldPath); // only the folder event, like the worst case
   }
@@ -124,5 +137,12 @@ export class FakeObsidianVault implements ObsidianVaultLike {
     queueMicrotask(() => {
       for (const handler of this.handlers.get(name) ?? []) handler(file, oldPath);
     });
+  }
+}
+
+/** Case-insensitive like APFS (macOS/iOS default): names compare folded, the stored spelling is kept. */
+export class CaseFoldingObsidianVault extends FakeObsidianVault {
+  protected override key(path: string): string {
+    return foldPathCase(path);
   }
 }

@@ -1,3 +1,4 @@
+import { foldPathCase } from "@obsidian-crdt/shared";
 import type { DocManager } from "./docManager";
 import type { FileReconciler } from "./fileReconciler";
 import type { VaultPort } from "./ports";
@@ -58,7 +59,9 @@ export class IndexApplier {
     const record = this.deps.records.get(entry.fileId);
     if (!record || record.path === entry.path) return "none";
     if (!this.deps.isEligible(entry.path)) return "none";
-    if ((await this.deps.vault.read(entry.path)) !== null) return "deferred"; // target busy; a later pass retries
+    // On a case-insensitive file system (APFS) a case-only move finds its own file at the target; that is not busy.
+    const caseOnly = foldPathCase(entry.path) === foldPathCase(record.path);
+    if (!caseOnly && (await this.deps.vault.read(entry.path)) !== null) return "deferred"; // busy; a later pass retries
     const sourceExists = (await this.deps.vault.read(record.path)) !== null;
     await this.deps.records.set(entry.fileId, { path: entry.path, base: record.base });
     if (sourceExists) await this.deps.vault.rename(record.path, entry.path);
