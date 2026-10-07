@@ -1,7 +1,7 @@
 # Obsidian CRDT 실시간 동기화 플러그인 — 설계 (1단계)
 
 - 작성일: 2026-10-07
-- 상태: 검토 대기
+- 상태: 승인됨 (2026-10-07), 구현 계획 작성 중 보정 반영
 - 범위: 1단계 (개인 다기기 동기화). 공개 배포(C)는 확장 가능하도록 구조만 열어둔다.
 
 ---
@@ -69,7 +69,7 @@ obsidian-crdt/
 |---|---|---|
 | `SyncConnection` | Hocuspocus 서버와 WebSocket 연결 하나를 관리하고 여러 문서를 함께 주고받는다(multiplexing). 인증, 지수 백오프 재접속, 온라인 상태를 맡고, 상태 표시줄에 연결 상태를 보여준다. | `@hocuspocus/provider` |
 | `VaultIndex` | 인덱스 Y.Doc 관리. `fileId ↔ path` 조회, 생성/이름 변경/삭제 표시, 같은 경로 충돌 해소. | `shared` |
-| `DocManager` | 파일별 Y.Doc의 불러오기/내리기, IndexedDB 영속화, 백그라운드 동기화 큐(열린 파일 우선). | `y-indexeddb`, `StoragePort` |
+| `DocManager` | 파일별 Y.Doc의 불러오기, IndexedDB 영속화, 백그라운드 동기화 큐(동시 개수 제한). 1단계는 모든 문서를 구독 상태로 유지한다(원격 변경을 받으려면 구독이 필요). 문서 내리기는 §9 측정 후 결정한다. | `y-indexeddb`, `StoragePort` |
 | `EditorBinding` | 열린 Markdown 편집기(CM6)에 `yCollab`을 연결하고, 탭이나 파일이 바뀌면 다시 연결한다. 원격 커서를 표시한다. | `y-codemirror.next`, `EditorPort` |
 | `DiskReconciler` | 디스크와 Y.Doc을 맞춘다. 자기가 쓴 변경 판별, 3-way 반영, 시작 시 전체 스캔, 대량 삭제 감지. | `VaultPort`, `diff-match-patch` |
 | `Settings` | 서버 URL, 토큰, vaultId, 제외 경로 패턴, 커밋 기기 안내. | Obsidian 설정 UI |
@@ -77,11 +77,11 @@ obsidian-crdt/
 **Port 인터페이스**
 - `VaultPort`: `list()`, `read(path)`, `write(path, text)`, `create`, `rename`, `trash`, 이벤트 구독(`create/modify/delete/rename`)
 - `EditorPort`: 열린 Markdown 편집기 목록과 각 편집기의 파일 경로, CM6 확장 등록
-- `StoragePort`: 파일별 base 텍스트, 마지막으로 쓴 내용 해시 등 로컬 메타데이터 저장
+- `StoragePort`: 파일별 로컬 기록(`path`, `base`)과 부트스트랩 완료 플래그 저장
 
 ### 3.3 서버
 
-- `@hocuspocus/server` + `@hocuspocus/extension-sqlite`로 Y.Doc 상태를 영속화한다.
+- `@hocuspocus/server` + `@hocuspocus/extension-database` + Node 내장 `node:sqlite`로 Y.Doc 상태를 영속화한다. (`extension-sqlite`가 의존하는 better-sqlite3는 네이티브 빌드가 필요하고 npm 11에서 설치 스크립트가 기본 차단되므로 쓰지 않는다.)
 - `onAuthenticate`: 토큰 해시를 비교해 vaultId를 확인하고, 문서 이름을 검증한다(§6).
 - 토큰 CLI: `token create --vault <id>`, `token revoke <tokenId>`, `token list`. 원본 토큰은 생성 시 한 번만 출력하고 서버에는 SHA-256 해시만 저장한다(256비트 무작위 값이라 느린 해시가 필요 없다).
 - 배포: Docker Compose(Hocuspocus + Caddy). Hocuspocus는 `127.0.0.1`에서만 대기하고, Caddy가 TLS를 종단한다. 외부 포트는 80/443만 연다.
@@ -107,8 +107,8 @@ files: Y.Map<fileId, Y.Map{
 - `content: Y.Text` — 노트 전체 텍스트(frontmatter 포함)
 
 **로컬 메타데이터 (StoragePort, IndexedDB)**
-- `base[fileId]`: 마지막으로 디스크와 맞췄던 텍스트
-- `lastWrittenHash[fileId]`: 플러그인이 마지막으로 디스크에 쓴 내용의 해시
+- `record[fileId] = { path, base }`: 이 기기 디스크에서 그 파일이 있는 경로와, 마지막으로 디스크와 맞췄던 텍스트
+- 자기가 쓴 변경 판별은 별도 해시 없이 §4.3의 3-way 판단으로 처리한다. 플러그인이 X를 쓰면 `base = X`이므로, 그 쓰기로 생긴 `modify` 이벤트는 "디스크 == 현재" 또는 "디스크 == base"로 판정된다.
 
 ---
 
@@ -123,8 +123,8 @@ files: Y.Map<fileId, Y.Map{
 
 ### 4.2 원격 변경 — 파일이 열려 있지 않을 때
 1. Y.Doc 업데이트 → `DISK_WRITE_DEBOUNCE_MS`(1000ms) 디바운스
-2. `VaultPort.write(path, ytext.toString())` → `lastWrittenHash`와 `base`를 갱신한다.
-3. 이 쓰기로 생기는 `modify` 이벤트는 디스크 해시가 `lastWrittenHash`와 같으므로 무시한다.
+2. §4.3의 판단을 실행한다. 디스크가 바깥에서 바뀌지 않았다면 `ytext.toString()`을 쓰고 `base`를 갱신한다.
+3. 이 쓰기로 생기는 `modify` 이벤트는 §4.3에서 "디스크 == 현재"로 판정되어 아무 일도 하지 않는다.
 
 ### 4.3 디스크가 바깥에서 바뀜 — 3-way 반영
 열려 있지 않은 파일의 `modify` 이벤트를 받았을 때와, 앱을 켤 때 전체 스캔에서 같은 절차를 쓴다.
@@ -133,6 +133,7 @@ files: Y.Map<fileId, Y.Map{
 disk = 디스크 내용, base = 마지막으로 맞췄던 내용, current = 현재 Y.Text
 
 if disk == current:            base = disk; 끝
+elif base 없음:                 부트스트랩 (§4.5) — 현재(서버) 내용을 유지하고, 디스크 내용은 conflict 사본으로 저장
 elif disk == base:             디스크가 바깥에서 바뀌지 않음 → current를 디스크에 쓴다 (§4.2)
 else:                          디스크가 실제로 바뀜
     patches = dmp.patch_make(base, disk)
@@ -141,6 +142,8 @@ else:                          디스크가 실제로 바뀜
     disk에 merged를 쓰고 base = merged
 ```
 - **핵심 시나리오:** 모바일에서 수정 → 서버 보관 → 데스크톱 Obsidian 실행 → 서버와 동기화 → 스캔에서 `disk == base`이므로 Y.Text(모바일 수정 포함)를 디스크에 쓴다 → 커밋 기기가 git 커밋.
+- Y.Text 반영은 **code point 단위 diff**로 한다. UTF-16 단위 diff는 이모지의 서로게이트 쌍을 쪼개고, Yjs가 이를 인코딩할 때 `U+FFFD`로 깨진다(실측으로 확인).
+- 병합 결과에 짝 없는 서로게이트가 있으면 병합 실패로 본다.
 - 일부 patch가 적용되지 않으면(`patch_apply`의 결과가 false) 해당 파일을 `이름 (conflict-disk YYYY-MM-DD <fileId 앞 6자>).md`로 저장하고 알림을 띄운다. 디스크 쪽 변경을 버리지 않기 위해서다.
 - 시작 스캔은 **서버와 처음 동기화가 끝난 뒤에** 실행한다. 오프라인이면 로컬 IndexedDB 상태를 기준으로 실행하고, 재접속하면 CRDT가 병합한다.
 
@@ -156,7 +159,7 @@ else:                          디스크가 실제로 바뀜
 기존 파일이 이미 있는 기기(예: git clone한 볼트)가 처음 연결할 때, 디스크 내용으로 Y.Doc을 따로 초기화하면 서버 내용과 합쳐져 텍스트가 두 배가 된다. 그래서 다음 절차를 따른다.
 1. 첫 동기화는 **온라인 필수**다. 오프라인이면 "첫 동기화는 온라인에서 필요" 알림을 띄우고 대기한다.
 2. 서버 인덱스를 먼저 받아서 경로 기준으로 로컬 파일과 fileId를 매칭한다.
-3. 매칭된 파일: 서버 문서를 받은 뒤 `base = 서버 텍스트`로 두고 §4.3을 수행한다. 내용이 같으면 아무것도 하지 않는다.
+3. 매칭된 파일: 서버 문서와 동기화가 **끝난 뒤에** §4.3을 수행한다(base 없음). 내용이 같으면 기록만 남긴다. 다르면 서버 내용이 이기고, 디스크 내용은 conflict 사본으로 남긴다. (처음 초안의 "base = 서버 텍스트"는 오래된 git clone 내용으로 서버의 최신 편집을 되돌리므로 폐기했다.)
 4. 서버에 없는 파일만 §4.4의 로컬 생성으로 등록한다.
 5. 서버 인덱스에만 있는 파일은 디스크에 만든다.
 
@@ -184,7 +187,7 @@ else:                          디스크가 실제로 바뀜
 - **전송:** `wss://`만 허용한다. `ws://`는 호스트가 `localhost`/`127.0.0.1`일 때만 허용한다.
 - **인증:** 볼트별 토큰(256비트 무작위 값). 서버에는 SHA-256 해시만 저장하고, 폐기를 지원한다.
 - **권한:** 문서 이름을 §3.4 정규식으로 검증하고, 문서의 vaultId가 토큰의 vaultId와 같아야만 허용한다. 최소 권한 원칙을 따른다.
-- **자원 제한:** 서버에 WebSocket 메시지 크기 상한과 토큰별 동시 연결 수 상한을 둔다.
+- **자원 제한:** 서버에 WebSocket 메시지 크기 상한(8MB)을 둔다. 토큰별 동시 연결 수 상한은 연결 하나로 여러 문서를 주고받는(multiplexing) 구조에서 측정 기준이 모호해서, 다중 사용자 단계(C)로 미룬다.
 - **토큰 저장:** 대상 Obsidian 버전에 플러그인용 비밀 저장 API가 있으면 그것을 쓴다. 없으면 `data.json`에 저장하고, 설정 화면에 "`.obsidian`을 git에 커밋하면 토큰이 노출됨" 경고와 `.gitignore` 안내를 표시한다.
 - **로그:** 구조화 로그(JSON)를 쓴다. 문서 내용과 토큰은 기록하지 않는다. 기록 항목은 연결 ID, 문서 이름, 이벤트 종류, 오류 코드다.
 
@@ -192,7 +195,7 @@ else:                          디스크가 실제로 바뀜
 
 ## 7. 테스트 전략
 
-- **단위 (Vitest):** `applyMinimalDiff`, 3-way 병합(§4.3), 인덱스 연산, conflict 이름 생성(UTC), 경로 필터, 문서 이름 검증, 대량 삭제 감지, 파일 크기 상한. 경계 사례로 빈 문자열, 한글/이모지(UTF-16 서로게이트), CRLF를 포함한다.
+- **단위 (Vitest):** `applyMinimalDiff`(원격 문서로 왕복해도 이모지가 보존되는지 포함), 3-way 병합(§4.3), 인덱스 연산, conflict 이름 생성(UTC), 경로 필터, 문서 이름 검증, 대량 삭제 감지, 파일 크기 상한. 경계 사례로 빈 문자열, 한글/이모지(UTF-16 서로게이트), CRLF를 포함한다.
 - **수렴 테스트:** 메모리 위의 가상 기기 N대가 시드를 고정한 무작위 편집, 무작위 동기화 순서, 오프라인 구간을 거쳐도 최종 텍스트와 인덱스가 같아야 한다.
 - **회귀 테스트 (먼저 실패하게 작성):**
   1. 기존 파일이 있는 새 기기가 부트스트랩해도 텍스트가 두 배가 되지 않는다.
