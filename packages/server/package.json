@@ -1,0 +1,22 @@
+{
+  "name": "@obsidian-crdt/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "esbuild src/bin/server.ts src/bin/token.ts --bundle --platform=node --format=esm --target=node24 --outdir=dist --external:@hocuspocus/* --external:yjs",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@hocuspocus/extension-database": "^4.7.0",
+    "@hocuspocus/server": "^4.7.0",
+    "@obsidian-crdt/shared": "*",
+    "yjs": "^13.6.33"
+  },
+  "devDependencies": {
+    "@hocuspocus/provider": "^4.7.0",
+    "esbuild": "^0.28.2"
+  }
+}
