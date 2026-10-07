@@ -1,26 +1,18 @@
-import * as Y from "yjs";
+import type { Awareness } from "y-protocols/awareness";
+import type * as Y from "yjs";
 import {
-  buildIndexDocName,
   DISK_WRITE_DEBOUNCE_MS,
+  EDITOR_SNAPSHOT_DEBOUNCE_MS,
   INDEX_PASS_DEBOUNCE_MS,
-  isSyncablePath,
   MASS_DELETE_THRESHOLD,
   MASS_DELETE_WINDOW_MS,
   normalizeVaultPath,
   RENAME_PAIR_WINDOW_MS,
 } from "@obsidian-crdt/shared";
-import { DocManager } from "./docManager";
-import { EchoTrackingVault } from "./echoTrackingVault";
-import { FileReconciler } from "./fileReconciler";
-import { IndexApplier } from "./indexApplier";
-import { LocalChangeHandler } from "./localChanges";
-import { MassDeleteGuard } from "./massDeleteGuard";
+import { createWiring, type Wiring } from "./engineWiring";
 import type { SyncNotice } from "./notices";
-import type { DocPersistence, DocSyncer, DocSyncHandle, PersistedDoc, StoragePort, VaultEvent, VaultPort } from "./ports";
-import { RecordStore } from "./recordStore";
+import type { DocPersistence, DocSyncer, DocSyncHandle, StoragePort, VaultEvent, VaultPort } from "./ports";
 import { KeyedDebouncer, SerialQueue, waitUntil } from "./scheduling";
-import { StartupScan } from "./startupScan";
-import { VaultIndex } from "./vaultIndex";
 
 export const BOOTSTRAP_FLAG = "bootstrapped";
 
@@ -30,6 +22,7 @@ export interface SyncTiming {
   renamePairWindowMs: number;
   massDeleteWindowMs: number;
   massDeleteThreshold: number;
+  editorSnapshotDebounceMs: number;
 }
 
 export const DEFAULT_TIMING: SyncTiming = {
@@ -38,6 +31,7 @@ export const DEFAULT_TIMING: SyncTiming = {
   renamePairWindowMs: RENAME_PAIR_WINDOW_MS,
   massDeleteWindowMs: MASS_DELETE_WINDOW_MS,
   massDeleteThreshold: MASS_DELETE_THRESHOLD,
+  editorSnapshotDebounceMs: EDITOR_SNAPSHOT_DEBOUNCE_MS,
 };
 
 export interface SyncEngineDeps {
@@ -60,18 +54,10 @@ export class EngineStoppedError extends Error {
   }
 }
 
-interface Wiring {
-  records: RecordStore;
-  docs: DocManager;
-  index: VaultIndex;
-  indexSync: DocSyncHandle;
-  indexPersisted: PersistedDoc;
-  indexDoc: Y.Doc;
-  reconciler: FileReconciler;
-  local: LocalChangeHandler;
-  applier: IndexApplier;
-  echoes: EchoTrackingVault;
-  scan: StartupScan;
+export interface EditorDoc {
+  fileId: string;
+  text: Y.Text;
+  awareness: Awareness | null;
 }
 
 export class SyncEngine {
@@ -148,6 +134,38 @@ export class SyncEngine {
     });
   }
 
+  /** The shared Y.Text for a tracked file, after every earlier vault event has been handled. */
+  async openDocForPath(path: string): Promise<EditorDoc | null> {
+    const normalized = normalizeVaultPath(path);
+    let result = null as EditorDoc | null;
+    await this.enqueue(async ({ records, docs }) => {
+      const fileId = records.findIdByPath(normalized);
+      if (!fileId) return;
+      const opened = await docs.open(fileId);
+      result = { fileId, text: opened.text, awareness: opened.sync.awareness };
+    });
+    return result;
+  }
+
+  /** Remember the current Y.Text of an open file right before the editor saves it (spec §9 close order). */
+  captureEditorSnapshot(path: string): void {
+    const fileId = this.wiring?.records.findIdByPath(normalizeVaultPath(path));
+    if (fileId) this.captureSnapshot(fileId);
+  }
+
+  private onTextChanged(fileId: string): void {
+    this.scheduleTextFlush(fileId);
+    const record = this.wiring?.records.get(fileId);
+    if (!record || this.stopped || !this.isOpenInEditor(record.path)) return;
+    this.debouncer.schedule(`snap:${fileId}`, this.timing.editorSnapshotDebounceMs, () => this.captureSnapshot(fileId));
+  }
+
+  private captureSnapshot(fileId: string): void {
+    const wiring = this.wiring;
+    const opened = wiring?.docs.peek(fileId);
+    if (wiring && opened) wiring.history.record(fileId, opened.text.toString());
+  }
+
   /** Resolves wiring when the task runs, and skips the task once the engine has stopped. */
   private enqueue(task: (wiring: Wiring) => Promise<void>): Promise<void> {
     return this.queue.enqueue(async () => {
@@ -157,23 +175,15 @@ export class SyncEngine {
   }
 
   private async wire(): Promise<Wiring> {
-    const { vaultId, storage, syncer, persistence } = this.deps;
-    const echoes = new EchoTrackingVault(this.deps.vault);
-    const vault = echoes;
-    const records = await RecordStore.load(storage);
-    const docs = new DocManager({ vaultId, syncer, persistence, onTextChanged: (id) => this.scheduleTextFlush(id) });
-    const indexDoc = new Y.Doc();
-    const indexName = buildIndexDocName(vaultId);
-    const indexPersisted = await persistence.attach(indexName, indexDoc);
-    const indexSync = syncer.connect(indexName, indexDoc);
-    const index = new VaultIndex(indexDoc);
-    const isEligible = (path: string) => isSyncablePath(path, this.deps.excludedPrefixes);
-    const reconciler = new FileReconciler({ vault, records, docs, now: this.now, notify: this.notify, requestRetry: (id) => this.scheduleTextFlush(id) });
-    const guard = new MassDeleteGuard({ threshold: this.timing.massDeleteThreshold, windowMs: this.timing.massDeleteWindowMs, now: this.now });
-    const local = new LocalChangeHandler({ vault, index, records, docs, reconciler, guard, now: this.now, notify: this.notify, isEligible, isOpenInEditor: this.isOpenInEditor });
-    const applier = new IndexApplier({ vault, index, records, docs, reconciler, isEligible, requestPass: () => this.scheduleIndexPass() });
-    const scan = new StartupScan({ vault, records, reconciler, local, applier, isEligible, notify: this.notify });
-    this.wiring = { records, docs, index, indexSync, indexPersisted, indexDoc, reconciler, local, applier, echoes, scan };
+    this.wiring = await createWiring(this.deps, {
+      now: this.now,
+      notify: this.notify,
+      isOpenInEditor: this.isOpenInEditor,
+      massDelete: { threshold: this.timing.massDeleteThreshold, windowMs: this.timing.massDeleteWindowMs },
+      onTextChanged: (id) => this.onTextChanged(id),
+      requestRetry: (id) => this.scheduleTextFlush(id),
+      requestPass: () => this.scheduleIndexPass(),
+    });
     return this.wiring;
   }
 

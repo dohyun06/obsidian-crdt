@@ -26,6 +26,7 @@ interface DocSlot {
 
 export class DocManager {
   private readonly slots = new Map<string, Promise<DocSlot>>();
+  private readonly ready = new Map<string, OpenedDoc>();
 
   constructor(private readonly deps: DocManagerDeps) {}
 
@@ -43,9 +44,15 @@ export class DocManager {
     return (await slot).opened;
   }
 
+  /** The doc if it has finished opening; never starts an open. */
+  peek(fileId: string): OpenedDoc | undefined {
+    return this.ready.get(fileId);
+  }
+
   async closeAll(): Promise<void> {
     const settled = await Promise.allSettled(this.slots.values());
     this.slots.clear();
+    this.ready.clear();
     for (const result of settled) {
       if (result.status !== "fulfilled") continue;
       const { opened, persisted } = result.value;
@@ -63,6 +70,8 @@ export class DocManager {
       if (origin !== DISK_ORIGIN) this.deps.onTextChanged(fileId);
     });
     const sync = this.deps.syncer.connect(docName, doc);
-    return { opened: { fileId, doc, text: doc.getText(CONTENT_TEXT_KEY), sync }, persisted };
+    const opened: OpenedDoc = { fileId, doc, text: doc.getText(CONTENT_TEXT_KEY), sync };
+    this.ready.set(fileId, opened);
+    return { opened, persisted };
   }
 }

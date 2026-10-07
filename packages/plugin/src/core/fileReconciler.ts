@@ -6,12 +6,14 @@ import type { VaultPort } from "./ports";
 import { decideDiskReconcile, type ReconcileDecision } from "./reconcileDecision";
 import type { RecordStore } from "./recordStore";
 import { applyMinimalDiff } from "./textDiff";
+import type { TextHistory } from "./textHistory";
 
 export interface FileReconcilerDeps {
   vault: VaultPort;
   records: RecordStore;
   docs: DocManager;
   now: () => number;
+  history: TextHistory;
   notify: (notice: SyncNotice) => void;
   requestRetry: (fileId: string) => void;
 }
@@ -46,23 +48,28 @@ export class FileReconciler {
     const disk = await this.deps.vault.read(record.path);
     if (disk === null) return; // missing files are handled by the delete flow
     if (!this.fitsSizeLimit(fileId, record.path, disk)) return;
-    const decision = decideDiskReconcile({ base: record.base, disk, current: opened.text.toString() });
+    const current = opened.text.toString();
+    // A disk text the Y.Text already had (a lagging editor save) carries nothing new: it is the real base.
+    const base = record.base !== null && disk !== current && this.deps.history.has(fileId, disk) ? disk : record.base;
+    const decision = decideDiskReconcile({ base, disk, current });
     const settled = await this.apply({ fileId, path: record.path, opened, disk }, decision);
-    if (!settled) this.deps.requestRetry(fileId);
+    if (!settled) return this.deps.requestRetry(fileId);
+    this.deps.history.forget(fileId);
   }
 
   /**
    * Spec §4.1: while a file is open in a bound editor, the disk is the editor's autosave. A save that has
    * caught up with the Y.Text (local typing or remote edits shown in the editor) becomes the new base, so the
-   * next three-way merge after the editor closes does not apply those changes a second time. A lagging save is
-   * ignored.
+   * next three-way merge after the editor closes does not apply those changes a second time. A save of a state the Y.Text recently
+   * had (recorded in TextHistory) is accepted too; anything else is ignored.
    */
   async acceptEditorSave(fileId: string): Promise<void> {
     const record = this.deps.records.get(fileId);
     if (!record) return;
     const opened = await this.deps.docs.open(fileId);
     const disk = await this.deps.vault.read(record.path);
-    if (disk === null || disk === record.base || disk !== opened.text.toString()) return;
+    if (disk === null || disk === record.base) return;
+    if (disk !== opened.text.toString() && !this.deps.history.has(fileId, disk)) return;
     await this.deps.records.set(fileId, { path: record.path, base: disk });
   }
 

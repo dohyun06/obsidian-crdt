@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DocManager } from "../src/core/docManager";
+import { TextHistory } from "../src/core/textHistory";
 import { FileReconciler } from "../src/core/fileReconciler";
 import type { SyncNotice } from "../src/core/notices";
 import { RecordStore } from "../src/core/recordStore";
@@ -25,6 +26,7 @@ async function setup(options: { files?: Record<string, string>; online?: boolean
     records,
     docs,
     now: () => NOW,
+    history: new TextHistory(),
     notify: (notice) => notices.push(notice),
     requestRetry: (fileId) => retries.push(fileId),
   });

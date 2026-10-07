@@ -15,6 +15,7 @@ export const FAST_TIMING: SyncTiming = {
   renamePairWindowMs: 20,
   massDeleteWindowMs: 60_000,
   massDeleteThreshold: 5,
+  editorSnapshotDebounceMs: 2,
 };
 
 export interface Device {

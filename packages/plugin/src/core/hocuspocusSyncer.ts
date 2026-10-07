@@ -39,6 +39,7 @@ export class HocuspocusSyncer implements DocSyncer {
     provider.attach();
     this.providers.add(provider);
     return {
+      awareness: provider.awareness ?? null,
       isSynced: () => provider.isSynced,
       whenSynced: () => waitForSynced(provider),
       destroy: () => {
