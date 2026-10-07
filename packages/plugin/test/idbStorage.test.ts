@@ -1,6 +1,6 @@
 import { IDBFactory } from "fake-indexeddb";
-import { describe, expect, it } from "vitest";
-import { openSyncDatabase, runRequest, STORE_RECORDS, StorageUnavailableError } from "../src/obsidian/idb";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { IDB_OPEN_TIMEOUT_MS, openSyncDatabase, runRequest, STORE_RECORDS, StorageUnavailableError } from "../src/obsidian/idb";
 import { IdbStorage } from "../src/obsidian/idbStorage";
 
 const DB = "crdt-sync/test-vault/test-vault-01";
@@ -56,4 +56,36 @@ describe("IdbStorage", () => {
     } as IDBFactory;
     await expect(openSyncDatabase(DB, mockFactory)).rejects.toThrow(StorageUnavailableError);
   });
+
+  it("rejects with StorageUnavailableError when open never completes", async () => {
+    vi.useFakeTimers();
+    const silentFactory = { open: () => ({}) as IDBOpenDBRequest } as unknown as IDBFactory;
+    const opening = openSyncDatabase(DB, silentFactory);
+    const assertion = expect(opening).rejects.toThrow(StorageUnavailableError);
+    await vi.advanceTimersByTimeAsync(IDB_OPEN_TIMEOUT_MS - 1);
+    let settled = false;
+    void opening.catch(() => void (settled = true));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await assertion;
+  });
+
+  it("closes a database whose open completes only after the timeout", async () => {
+    vi.useFakeTimers();
+    const request = {} as IDBOpenDBRequest & { result: IDBDatabase };
+    const closed = vi.fn();
+    const slowFactory = { open: () => request } as unknown as IDBFactory;
+    const opening = openSyncDatabase(DB, slowFactory);
+    const assertion = expect(opening).rejects.toThrow(StorageUnavailableError);
+    await vi.advanceTimersByTimeAsync(IDB_OPEN_TIMEOUT_MS);
+    await assertion;
+    Object.assign(request, { result: { close: closed } });
+    request.onsuccess!.call(request, new Event("success"));
+    expect(closed).toHaveBeenCalledOnce();
+  });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
