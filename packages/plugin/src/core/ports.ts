@@ -10,7 +10,11 @@ export type VaultEvent =
 export interface VaultPort {
   listFiles(): Promise<string[]>;
   read(path: string): Promise<string | null>;
-  /** Writes `next` only if the file still holds `expected` (`null` = must not exist). Returns false if the disk changed. */
+  /**
+   * Writes `next` only if the file still holds `expected` (`null` = must not exist).
+   * Returns false only on a compare-and-swap mismatch; I/O failures must throw. Callers retry on false
+   * (e.g. findFreePath + replace loops for conflict copies), so a false for any other reason would loop forever.
+   */
   replace(path: string, expected: string | null, next: string): Promise<boolean>;
   rename(oldPath: string, newPath: string): Promise<void>;
   /** Moves to the vault trash (recoverable). */

@@ -39,7 +39,10 @@ export class LocalChangeHandler {
     const knownId = this.deps.records.findIdByPath(path);
     if (knownId) return this.deps.reconciler.reconcile(knownId);
     const live = this.deps.index.findLiveByPath(path);
-    if (live) return this.adoptRemoteEntry(live.fileId, path);
+    // A live entry this device still tracks at another path is a remote move the index pass has not applied yet.
+    // Taking it over would orphan the file at the old path; instead this file is registered as its own entry and
+    // the same-path rule (spec §4.4) settles the collision on every device.
+    if (live && !this.deps.records.get(live.fileId)) return this.adoptRemoteEntry(live.fileId, path);
     const text = await this.deps.vault.read(path);
     if (text === null) return;
     if (!isWithinSizeLimit(text)) return this.deps.notify({ kind: "file-too-large", path });
