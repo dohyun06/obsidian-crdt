@@ -1,0 +1,32 @@
+services:
+  sync-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      HOST: 0.0.0.0
+      PORT: "1234"
+      DB_PATH: /app/data/sync.db
+    volumes:
+      - sync-data:/app/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SYNC_DOMAIN: ${SYNC_DOMAIN:?set SYNC_DOMAIN in deploy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - sync-server
+    restart: unless-stopped
+
+volumes:
+  sync-data: {}
+  caddy-data: {}
+  caddy-config: {}
