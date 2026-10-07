@@ -124,5 +124,6 @@ function readEntry(fileId: string, raw: unknown): IndexEntry | null {
   const createdAt = raw.get("createdAt");
   if (typeof path !== "string" || !isSafeRelativePath(path)) return null;
   if (typeof deleted !== "boolean" || typeof createdAt !== "number" || !Number.isFinite(createdAt)) return null;
+  if (Number.isNaN(new Date(createdAt).getTime())) return null;
   return { fileId, path, deleted, createdAt };
 }

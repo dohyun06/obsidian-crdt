@@ -5,6 +5,8 @@ import { UnknownFileIdError, VaultIndex } from "../src/core/vaultIndex";
 const ID_A = "aaaaaaaa-0000-4000-8000-000000000001";
 const ID_B = "bbbbbbbb-0000-4000-8000-000000000002";
 const ID_C = "cccccccc-0000-4000-8000-000000000003";
+const ID_D = "dddddddd-0000-4000-8000-000000000004";
+const ID_E = "eeeeeeee-0000-4000-8000-000000000005";
 const CREATED = Date.UTC(2026, 9, 7, 9);
 
 function idsFrom(...ids: string[]): () => string {
@@ -87,6 +89,16 @@ describe("VaultIndex", () => {
     nanCreated.set("path", "ok2.md");
     nanCreated.set("deleted", false);
     nanCreated.set("createdAt", NaN);
+    const outOfRange = new Y.Map<unknown>();
+    files.set(ID_D, outOfRange);
+    outOfRange.set("path", "ok3.md");
+    outOfRange.set("deleted", false);
+    outOfRange.set("createdAt", 1e20);
+    const infinityCreated = new Y.Map<unknown>();
+    files.set(ID_E, infinityCreated);
+    infinityCreated.set("path", "ok4.md");
+    infinityCreated.set("deleted", false);
+    infinityCreated.set("createdAt", Infinity);
     expect(new VaultIndex(doc).entries()).toEqual([]);
   });
 });
