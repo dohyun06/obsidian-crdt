@@ -1,0 +1,9 @@
+{
+  "id": "crdt-sync",
+  "name": "CRDT Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.11.4",
+  "description": "Conflict-free real-time sync of Markdown notes across your devices (Yjs + Hocuspocus).",
+  "author": "Dohyun Kim",
+  "isDesktopOnly": false
+}
