@@ -139,6 +139,18 @@ export class SyncEngine {
     return this.enqueue((wiring) => wiring.local.restorePausedDeletes());
   }
 
+  /**
+   * Called by the editor binding when a bound editor closes. Remote edits and modify events were left to the
+   * editor while it was open (spec §4.1); now the disk and Y.Text are brought together again.
+   */
+  notifyEditorClosed(path: string): void {
+    const normalized = normalizeVaultPath(path);
+    void this.enqueue(async (wiring) => {
+      const fileId = wiring.records.findIdByPath(normalized);
+      if (fileId) await this.flushRemoteText(wiring, fileId);
+    });
+  }
+
   /** Resolves wiring when the task runs, and skips the task once the engine has stopped. */
   private enqueue(task: (wiring: Wiring) => Promise<void>): Promise<void> {
     return this.queue.enqueue(async () => {

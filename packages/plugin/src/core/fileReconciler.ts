@@ -51,6 +51,21 @@ export class FileReconciler {
     if (!settled) this.deps.requestRetry(fileId);
   }
 
+  /**
+   * Spec §4.1: while a file is open in a bound editor, the disk is the editor's autosave. A save that has
+   * caught up with the Y.Text (local typing or remote edits shown in the editor) becomes the new base, so the
+   * next three-way merge after the editor closes does not apply those changes a second time. A lagging save is
+   * ignored.
+   */
+  async acceptEditorSave(fileId: string): Promise<void> {
+    const record = this.deps.records.get(fileId);
+    if (!record) return;
+    const opened = await this.deps.docs.open(fileId);
+    const disk = await this.deps.vault.read(record.path);
+    if (disk === null || disk === record.base || disk !== opened.text.toString()) return;
+    await this.deps.records.set(fileId, { path: record.path, base: disk });
+  }
+
   private retryWhenSynced(fileId: string, opened: OpenedDoc): void {
     if (this.awaitingSync.has(fileId)) return;
     this.awaitingSync.add(fileId);

@@ -1,4 +1,5 @@
-import { buildFileDocName } from "@obsidian-crdt/shared";
+import { buildFileDocName, CONTENT_TEXT_KEY } from "@obsidian-crdt/shared";
+import type * as Y from "yjs";
 import type { SyncNotice } from "../../src/core/notices";
 import { SyncEngine, type SyncTiming } from "../../src/core/syncEngine";
 import { FakeVault } from "./fakeVault";
@@ -77,4 +78,16 @@ export function fileDocName(device: Device, path: string): string {
   const fileId = [...device.storage.records.entries()].find(([, record]) => record.path === path)?.[0];
   if (!fileId) throw new Error(`${device.name} has no record for ${path}`);
   return buildFileDocName(TEST_VAULT_ID, fileId);
+}
+
+/** Opens the file in a (simulated) bound editor and returns the Y.Text that yCollab would edit. */
+export function openEditor(device: Device, path: string): Y.Text {
+  device.openInEditor.add(path);
+  return device.persistence.attachedDoc(fileDocName(device, path)).getText(CONTENT_TEXT_KEY);
+}
+
+/** What Plan 2's editor binding does when the tab closes. */
+export function closeEditor(device: Device, path: string): void {
+  device.openInEditor.delete(path);
+  device.engine.notifyEditorClosed(path);
 }

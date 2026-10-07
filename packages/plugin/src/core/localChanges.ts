@@ -49,8 +49,13 @@ export class LocalChangeHandler {
   }
 
   async handleModify(path: string): Promise<void> {
-    if (!this.deps.isEligible(path) || this.deps.isOpenInEditor(path)) return;
+    if (!this.deps.isEligible(path)) return;
     const fileId = this.deps.records.findIdByPath(path);
+    if (this.deps.isOpenInEditor(path)) {
+      // The editor owns open files (spec §4.1); only an autosave that matches the Y.Text is taken, as the new base.
+      if (fileId) await this.deps.reconciler.acceptEditorSave(fileId);
+      return;
+    }
     if (fileId) return this.deps.reconciler.reconcile(fileId);
     return this.handleCreate(path);
   }
