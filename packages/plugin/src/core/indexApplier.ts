@@ -2,6 +2,7 @@ import { foldPathCase } from "@obsidian-crdt/shared";
 import type { DocManager } from "./docManager";
 import type { FileReconciler } from "./fileReconciler";
 import type { VaultPort } from "./ports";
+import type { FileRecord } from "./ports";
 import type { RecordStore } from "./recordStore";
 import type { IndexEntry, VaultIndex } from "./vaultIndex";
 
@@ -59,13 +60,32 @@ export class IndexApplier {
     const record = this.deps.records.get(entry.fileId);
     if (!record || record.path === entry.path) return "none";
     if (!this.deps.isEligible(entry.path)) return "none";
-    // On a case-insensitive file system (APFS) a case-only move finds its own file at the target; that is not busy.
-    const caseOnly = foldPathCase(entry.path) === foldPathCase(record.path);
-    if (!caseOnly && (await this.deps.vault.read(entry.path)) !== null) return "deferred"; // busy; a later pass retries
-    const sourceExists = (await this.deps.vault.read(record.path)) !== null;
-    await this.deps.records.set(entry.fileId, { path: entry.path, base: record.base });
-    if (sourceExists) await this.deps.vault.rename(record.path, entry.path);
+    if (await this.isTargetBusy(record.path, entry.path)) return "deferred"; // a later pass retries
+    await this.moveRecordAndFile(entry.fileId, record, entry.path);
     return "moved";
+  }
+
+  /**
+   * On a case-insensitive file system (APFS) a case-only move finds its own file at the target; that is not busy.
+   * There only the source spelling is listed, so the target is busy only when its exact spelling is listed: a
+   * different file on a case-sensitive file system (Linux, Android).
+   */
+  private async isTargetBusy(sourcePath: string, targetPath: string): Promise<boolean> {
+    if (foldPathCase(targetPath) !== foldPathCase(sourcePath)) return (await this.deps.vault.read(targetPath)) !== null;
+    return (await this.deps.vault.listFiles()).includes(targetPath);
+  }
+
+  /** The record moves first, so the resulting rename event is ignored; a failed rename restores it. */
+  private async moveRecordAndFile(fileId: string, record: FileRecord, targetPath: string): Promise<void> {
+    const sourceExists = (await this.deps.vault.read(record.path)) !== null;
+    await this.deps.records.set(fileId, { path: targetPath, base: record.base });
+    if (!sourceExists) return;
+    try {
+      await this.deps.vault.rename(record.path, targetPath);
+    } catch (error) {
+      await this.deps.records.set(fileId, record); // never leave the record pointing at a file that is not this one
+      throw error;
+    }
   }
 
   private occupantMustMove(entry: IndexEntry): boolean {
@@ -80,9 +100,7 @@ export class IndexApplier {
     if (!record) return;
     const temporary = temporaryMovePath(record.path, entry.fileId);
     if ((await this.deps.vault.read(temporary)) !== null) return;
-    const sourceExists = (await this.deps.vault.read(record.path)) !== null;
-    await this.deps.records.set(entry.fileId, { path: temporary, base: record.base });
-    if (sourceExists) await this.deps.vault.rename(record.path, temporary);
+    await this.moveRecordAndFile(entry.fileId, record, temporary);
     this.deps.requestPass();
   }
 
