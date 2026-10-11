@@ -1,91 +1,8 @@
 // @vitest-environment jsdom
-import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it } from "vitest";
-import * as Y from "yjs";
-import type { EditorDoc } from "../src/core/syncEngine";
-import { EditorBridge, type EditorDocSource } from "../src/editor/editorBridge";
+import { setup, tick, views } from "./fakes/editorBridgeHarness";
 
-const USER = { name: "A", color: "#f00", colorLight: "#f003" };
-const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
-
-class FakeSource implements EditorDocSource {
-  readonly texts = new Map<string, Y.Text>();
-  readonly calls: string[] = [];
-  readonly editorTexts: Array<string | undefined> = [];
-  readonly previousEditorTexts: Array<string | undefined> = [];
-  private readonly opens = new Map<string, number>();
-  /** Opens and closes as the engine sees them, in order. */
-  readonly order: string[] = [];
-  /** Runs inside openDocForPath, e.g. to simulate typing while the request is in flight. */
-  duringOpen: (() => void) | null = null;
-  track(path: string, content: string): Y.Text {
-    const text = new Y.Doc().getText("content");
-    text.insert(0, content);
-    this.texts.set(path, text);
-    return text;
-  }
-  async openDocForPath(path: string, editorText?: string, previousEditorText?: string): Promise<EditorDoc | null> {
-    this.editorTexts.push(editorText);
-    this.previousEditorTexts.push(previousEditorText);
-    const during = this.duringOpen;
-    this.duringOpen = null;
-    during?.();
-    const text = this.texts.get(path);
-    if (!text) return null;
-    // Stands in for the engine's merge: an unsaved editor text the Y.Text does not have yet is taken over.
-    if (editorText !== undefined && editorText !== text.toString()) {
-      text.delete(0, text.length);
-      text.insert(0, editorText);
-    }
-    this.opens.set(path, this.openCount(path) + 1);
-    this.order.push(`open:${path}`);
-    return { fileId: path, text, awareness: null };
-  }
-  /** Like the engine: every non-null open counts until a close with the same fileId. */
-  openCount(fileId: string): number {
-    return this.opens.get(fileId) ?? 0;
-  }
-  captureEditorSnapshot(path: string): void {
-    this.calls.push(`capture:${path}`);
-  }
-  notifyEditorClosed(path: string, fileId?: string): void {
-    this.calls.push(`closed:${path}`);
-    if (fileId) this.opens.set(fileId, this.openCount(fileId) - 1);
-    this.order.push(`closed:${path}`);
-  }
-}
-
-const views: EditorView[] = [];
 afterEach(() => views.splice(0).forEach((view) => view.destroy()));
-
-function setup() {
-  const source = new FakeSource();
-  const files = new Map<EditorView, { path: string | null }>();
-  const errors: unknown[] = [];
-  const debug: string[] = [];
-  const bridge = new EditorBridge({
-    getSource: () => source,
-    getUser: () => USER,
-    fileOf: (state) => [...files.entries()].find(([view]) => view.state === state)?.[1].path ?? pendingPath,
-    saveEditor: async (_view, path) => {
-      source.calls.push(`save:${path}`);
-    },
-    reportError: (error) => errors.push(error),
-    retry: { initialDelayMs: 5, maxDelayMs: 20 },
-    debug: (event, fields) => debug.push(`${event} ${JSON.stringify(fields)}`),
-  });
-  let pendingPath: string | null = null;
-  const open = (path: string, content: string) => {
-    pendingPath = path;
-    const info = { path: path as string | null };
-    const view = new EditorView({ state: EditorState.create({ doc: content, extensions: [bridge.extension()] }), parent: document.body });
-    files.set(view, info);
-    views.push(view);
-    return { view, info };
-  };
-  return { source, bridge, open, errors, debug };
-}
 
 describe("EditorBridge", () => {
   it("binds an opened file and syncs typing", async () => {
@@ -212,53 +129,6 @@ describe("EditorBridge", () => {
     expect(bridge.isOpen("a.md")).toBe(true);
   });
 
-  it("keeps text typed while the editor was unbound (regression: attach wiped unsaved text)", async () => {
-    const { source, open } = setup();
-    const text = source.track("a.md", "x");
-    const { view } = open("pending.md", "x");
-    await tick(8); // untracked: the bridge keeps retrying
-    view.dispatch({ changes: { from: 1, insert: " typed while unbound" } }); // not saved yet
-    source.texts.set("pending.md", text);
-    await tick(40);
-    expect(view.state.doc.toString()).toBe("x typed while unbound");
-    expect(text.toString()).toBe("x typed while unbound");
-  });
-
-  it("asks again when the editor text changes while the doc is being opened", async () => {
-    const { source, open } = setup();
-    const text = source.track("a.md", "x");
-    let view: ReturnType<typeof open>["view"] | null = null;
-    source.duringOpen = () => view!.dispatch({ changes: { from: 1, insert: "y" } });
-    view = open("a.md", "x").view;
-    await tick(10);
-    expect(source.editorTexts).toEqual(["x", "xy"]);
-    expect(text.toString()).toBe("xy");
-    expect(view.state.doc.toString()).toBe("xy");
-  });
-
-  it("passes the text absorbed by the previous request, so only the newly typed delta is merged (regression: duplication)", async () => {
-    const { source, open } = setup();
-    source.track("a.md", "x");
-    let view: ReturnType<typeof open>["view"] | null = null;
-    source.duringOpen = () => {
-      view!.dispatch({ changes: { from: 1, insert: "1" } }); // typing during request 1
-      source.duringOpen = () => view!.dispatch({ changes: { from: 2, insert: "2" } }); // ...and during request 2
-    };
-    view = open("a.md", "x").view;
-    await tick(10);
-    expect(source.editorTexts).toEqual(["x", "x1", "x12"]);
-    expect(source.previousEditorTexts).toEqual([undefined, "x", "x1"]);
-    expect(source.openCount("a.md")).toBe(1);
-  });
-
-  it("passes no previous editor text after a request that found no doc", async () => {
-    const { source, open } = setup();
-    open("late.md", "x");
-    await tick(8);
-    source.track("late.md", "x");
-    await tick(30);
-    expect(source.previousEditorTexts.every((previous) => previous === undefined)).toBe(true);
-  });
 
   it("reports the old path closed only after the renamed note is opened again", async () => {
     const { source, bridge, open } = setup();
