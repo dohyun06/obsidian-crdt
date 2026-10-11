@@ -4,8 +4,12 @@ import type { DebugLog, EditorDoc } from "../core/syncEngine";
 import { attachSync, boundPathOf, detachSync, type EditorUser, editorSyncExtension, type FileOf } from "./editorSync";
 
 export interface EditorDocSource {
-  /** `editorText`: what the editor shows now; text typed while unbound is merged into the Y.Text before binding. */
-  openDocForPath(path: string, editorText?: string): Promise<EditorDoc | null>;
+  /**
+   * `editorText`: what the editor shows now; text typed while unbound is merged into the Y.Text before binding.
+   * `previousEditorText`: the editor text an earlier request of the same bind already merged; only the delta typed
+   * since then is merged.
+   */
+  openDocForPath(path: string, editorText?: string, previousEditorText?: string): Promise<EditorDoc | null>;
   captureEditorSnapshot(path: string, fileId?: string): void;
   /** Balances one non-null openDocForPath result. */
   notifyEditorClosed(path: string, fileId?: string): void;
@@ -152,19 +156,23 @@ export class EditorBridge {
 
   /**
    * Opens the doc with the editor's current text, so text typed while unbound is merged instead of wiped by the
-   * alignment. Asks again (bounded) when the user typed while the request was in flight; every superseded open is
-   * reported closed after the next one, so the engine's open count stays balanced and never drops to zero.
+   * alignment. Asks again (bounded) when the user typed while the request was in flight, passing the text the
+   * previous request merged so only the newly typed delta is merged (not the whole text a second time). Every
+   * superseded open is reported closed after the next one, so the engine's open count stays balanced and never
+   * drops to zero.
    */
   private async openWithEditorText(view: EditorView, path: string): Promise<OpenedFor | null> {
     const source = this.deps.getSource();
     if (!source) return null;
     let opened: OpenedFor | null = null;
+    let absorbedText: string | undefined;
     for (let request = 1; ; request++) {
       const editorText = view.state.doc.toString();
-      const doc = await source.openDocForPath(path, editorText);
+      const doc = await source.openDocForPath(path, editorText, absorbedText);
       if (opened) source.notifyEditorClosed(path, opened.doc.fileId);
       opened = doc ? { source, doc } : null;
       if (!opened || view.state.doc.toString() === editorText || request > EDITOR_TEXT_REQUESTS) return opened;
+      absorbedText = editorText; // this request returned a doc: its editor text is in the Y.Text now
       this.debug("bind-editor-changed", { path, request });
     }
   }

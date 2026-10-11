@@ -68,23 +68,39 @@ export class FileReconciler {
    * is not on disk yet. It is merged into the Y.Text like one (spec §4.3), but nothing is written to disk and the
    * base stays: the bound editor saves the result, and that save becomes the base (acceptEditorSave).
    * On a conflict the Y.Text is kept and the editor text is saved as a conflict-disk copy, so it is never lost.
+   * `previousEditorText` (an editor text an earlier request of the same bind already merged) is the base then, so
+   * only the delta typed since is merged. Every absorbed editor text is recorded in the TextHistory: it carries
+   * nothing new any more, so a second pane showing the same text does not merge it twice.
    */
-  async absorbEditorText(fileId: string, editorText: string): Promise<AbsorbOutcome> {
+  async absorbEditorText(fileId: string, editorText: string, previousEditorText?: string): Promise<AbsorbOutcome> {
     const record = this.deps.records.get(fileId);
     if (!record || record.base === null) return "skipped";
     const opened = await this.deps.docs.open(fileId);
-    const current = opened.text.toString();
     const target: Target = { fileId, path: record.path, opened, disk: editorText };
+    const outcome = await this.absorbInto(target, record.base, previousEditorText);
+    this.deps.history.record(fileId, editorText);
+    return outcome;
+  }
+
+  private async absorbInto(target: Target, recordBase: string, previousEditorText?: string): Promise<ReconcileDecision["kind"]> {
+    const editorText = target.disk;
     if (!isWithinSizeLimit(editorText)) {
       await this.saveDiskCopy(target, editorText); // spec §5: never pushed into the Y.Text, but never dropped either
       return "conflict";
     }
-    // An editor that has not reloaded yet still shows the disk text this engine just replaced: nothing new in it.
-    const base = editorText === this.replacedDiskTexts.get(fileId) ? editorText : this.baseFor(fileId, record.base, editorText, current);
+    const current = target.opened.text.toString();
+    const base = this.absorbBase(target.fileId, recordBase, editorText, current, previousEditorText);
     const decision = decideDiskReconcile({ base, disk: editorText, current });
-    if (decision.kind === "merge") applyMinimalDiff(opened.text, decision.text, EDITOR_TEXT_ORIGIN);
+    if (decision.kind === "merge") applyMinimalDiff(target.opened.text, decision.text, EDITOR_TEXT_ORIGIN);
     if (decision.kind === "conflict") await this.saveDiskCopy(target, decision.diskCopy);
     return decision.kind;
+  }
+
+  private absorbBase(fileId: string, recordBase: string, editorText: string, current: string, previousEditorText?: string): string | null {
+    if (previousEditorText !== undefined) return previousEditorText;
+    // An editor that has not reloaded yet still shows the disk text this engine just replaced: nothing new in it.
+    if (editorText === this.replacedDiskTexts.get(fileId)) return editorText;
+    return this.baseFor(fileId, recordBase, editorText, current);
   }
 
   /**

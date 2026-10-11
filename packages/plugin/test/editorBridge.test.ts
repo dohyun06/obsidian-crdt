@@ -13,6 +13,7 @@ class FakeSource implements EditorDocSource {
   readonly texts = new Map<string, Y.Text>();
   readonly calls: string[] = [];
   readonly editorTexts: Array<string | undefined> = [];
+  readonly previousEditorTexts: Array<string | undefined> = [];
   private readonly opens = new Map<string, number>();
   /** Opens and closes as the engine sees them, in order. */
   readonly order: string[] = [];
@@ -24,8 +25,9 @@ class FakeSource implements EditorDocSource {
     this.texts.set(path, text);
     return text;
   }
-  async openDocForPath(path: string, editorText?: string): Promise<EditorDoc | null> {
+  async openDocForPath(path: string, editorText?: string, previousEditorText?: string): Promise<EditorDoc | null> {
     this.editorTexts.push(editorText);
+    this.previousEditorTexts.push(previousEditorText);
     const during = this.duringOpen;
     this.duringOpen = null;
     during?.();
@@ -232,6 +234,30 @@ describe("EditorBridge", () => {
     expect(source.editorTexts).toEqual(["x", "xy"]);
     expect(text.toString()).toBe("xy");
     expect(view.state.doc.toString()).toBe("xy");
+  });
+
+  it("passes the text absorbed by the previous request, so only the newly typed delta is merged (regression: duplication)", async () => {
+    const { source, open } = setup();
+    source.track("a.md", "x");
+    let view: ReturnType<typeof open>["view"] | null = null;
+    source.duringOpen = () => {
+      view!.dispatch({ changes: { from: 1, insert: "1" } }); // typing during request 1
+      source.duringOpen = () => view!.dispatch({ changes: { from: 2, insert: "2" } }); // ...and during request 2
+    };
+    view = open("a.md", "x").view;
+    await tick(10);
+    expect(source.editorTexts).toEqual(["x", "x1", "x12"]);
+    expect(source.previousEditorTexts).toEqual([undefined, "x", "x1"]);
+    expect(source.openCount("a.md")).toBe(1);
+  });
+
+  it("passes no previous editor text after a request that found no doc", async () => {
+    const { source, open } = setup();
+    open("late.md", "x");
+    await tick(8);
+    source.track("late.md", "x");
+    await tick(30);
+    expect(source.previousEditorTexts.every((previous) => previous === undefined)).toBe(true);
   });
 
   it("reports the old path closed only after the renamed note is opened again", async () => {

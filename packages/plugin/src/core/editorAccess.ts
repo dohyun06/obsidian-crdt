@@ -42,9 +42,10 @@ export class EditorAccess {
   /**
    * The shared Y.Text for a tracked file, after every earlier vault event has been handled. Each non-null result
    * counts the file as open until a matching notifyEditorClosed. `editorText` is what the editor shows right now:
-   * text typed while it was unbound is merged in before it is aligned to the Y.Text.
+   * text typed while it was unbound is merged in before it is aligned to the Y.Text. `previousEditorText` is the
+   * editor text an earlier request of the same bind already merged: only the delta typed since then is merged.
    */
-  async openDocForPath(path: string, editorText?: string): Promise<EditorDoc | null> {
+  async openDocForPath(path: string, editorText?: string, previousEditorText?: string): Promise<EditorDoc | null> {
     const normalized = normalizeVaultPath(path);
     let result = null as EditorDoc | null;
     let outcome = "untracked";
@@ -53,7 +54,8 @@ export class EditorAccess {
       if (!fileId) return;
       // base === null: not reconciled yet; an editor bound to this Y.Text could wipe the disk (spec §4.5).
       if (records.get(fileId)?.base === null) return void (outcome = "not-reconciled");
-      outcome = editorText === undefined ? "opened" : `absorbed-${await reconciler.absorbEditorText(fileId, editorText)}`;
+      if (editorText === undefined) outcome = "opened";
+      else outcome = `absorbed-${await reconciler.absorbEditorText(fileId, editorText, previousEditorText)}`;
       const opened = await docs.open(fileId);
       this.markOpen(fileId);
       result = { fileId, text: opened.text, awareness: opened.sync.awareness };

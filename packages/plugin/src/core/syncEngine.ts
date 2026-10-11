@@ -135,9 +135,12 @@ export class SyncEngine {
     this.editors.notifyEditorClosed(path, fileId);
   }
 
-  /** The shared Y.Text for a tracked file; `editorText` (what the editor shows) is merged in first. */
-  openDocForPath(path: string, editorText?: string): Promise<EditorDoc | null> {
-    return this.editors.openDocForPath(path, editorText);
+  /**
+   * The shared Y.Text for a tracked file; `editorText` (what the editor shows) is merged in first, against
+   * `previousEditorText` when an earlier request of the same bind already merged that text.
+   */
+  openDocForPath(path: string, editorText?: string, previousEditorText?: string): Promise<EditorDoc | null> {
+    return this.editors.openDocForPath(path, editorText, previousEditorText);
   }
 
   /** Remember the current Y.Text of an open file right before the editor saves it (spec §9 close order). */

@@ -59,6 +59,26 @@ describe("editor text absorbed when an editor binds (regression: unsaved text wi
   });
 });
 
+describe("bind re-requests and second panes merge each typed text once (regression: duplicated lines)", () => {
+  it("merges only the delta typed since the previous request of the same bind", async () => {
+    const { a } = await pairWithNote("hello\n");
+    const first = "hello\nworld one\n";
+    const second = "hello\nworld one two\n"; // the user kept typing while request 1 was in flight
+    await a.engine.openDocForPath("n.md", first);
+    const doc = await a.engine.openDocForPath("n.md", second, first);
+    expect(doc?.text.toString()).toBe(second);
+  });
+
+  it("does not merge an editor text a second time when another pane shows the same absorbed text", async () => {
+    const { a } = await pairWithNote("hello\n");
+    const shown = "hello\ntyped\n";
+    const doc = (await a.engine.openDocForPath("n.md", shown))!;
+    doc.text.insert(doc.text.length, "more\n"); // the bound pane keeps typing
+    await a.engine.openDocForPath("n.md", shown); // a second pane, still unbound, shows the earlier text
+    expect(doc.text.toString()).toBe("hello\ntyped\nmore\n");
+  });
+});
+
 describe("files open in an editor are tracked by fileId (regression: rename of an open note)", () => {
   it("does not merge a lagging autosave a second time when the open note is renamed", async () => {
     const { a, b } = await pairWithNote("hello\n");
