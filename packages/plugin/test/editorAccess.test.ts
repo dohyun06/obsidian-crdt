@@ -46,6 +46,23 @@ describe("editor text absorbed when an editor binds (regression: unsaved text wi
     expect(doc?.text.toString()).toBe("v1\nremote\n");
   });
 
+  it("keeps a remote edit and saves a stale editor's typing as a conflict copy (regression: remote edit reverted)", async () => {
+    const { a, b } = await pairWithNote("v1\n");
+    b.vault.externalWrite("n.md", "v1\nremote\n"); // A's engine replaces v1 on A's disk while no editor is bound
+    await settle([a, b]);
+    const stale = (await a.engine.openDocForPath("n.md", "v1\ntyped\n"))!; // not reloaded, and the user typed
+    expect(stale.text.toString()).toBe("v1\nremote\n");
+    const copies = () => [...a.vault.files.entries()].filter(([path]) => path.includes("conflict-disk")).map(([, text]) => text);
+    expect(copies()).toEqual(["v1\ntyped\n"]);
+    expect(a.notices.some((notice) => notice.kind === "conflict-copy")).toBe(true);
+    a.engine.notifyEditorClosed("n.md", stale.fileId);
+    await settle([a, b]);
+    // The guard covers only the first bind after the replace: a later bind with typing is a normal merge.
+    const later = await a.engine.openDocForPath("n.md", "v1\nremote\nlater\n");
+    expect(later?.text.toString()).toBe("v1\nremote\nlater\n");
+    expect(copies()).toEqual(["v1\ntyped\n"]);
+  });
+
   it("keeps the Y.Text and saves the editor text as a conflict copy when they cannot merge", async () => {
     const { a, b } = await pairWithNote("The quick brown fox jumps over the lazy dog");
     a.openInEditor.add("n.md");

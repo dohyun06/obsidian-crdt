@@ -71,6 +71,9 @@ export class FileReconciler {
    * `previousEditorText` (an editor text an earlier request of the same bind already merged) is the base then, so
    * only the delta typed since is merged. Every absorbed editor text is recorded in the TextHistory: it carries
    * nothing new any more, so a second pane showing the same text does not merge it twice.
+   * An editor that still shows the disk text this engine replaced while no editor was bound, plus typing, keeps the
+   * Y.Text (the remote edit) and its text is saved as a conflict-disk copy. The remembered replaced text is consumed
+   * by the first bind after the replace.
    */
   async absorbEditorText(fileId: string, editorText: string, previousEditorText?: string): Promise<AbsorbOutcome> {
     const record = this.deps.records.get(fileId);
@@ -78,6 +81,7 @@ export class FileReconciler {
     const opened = await this.deps.docs.open(fileId);
     const target: Target = { fileId, path: record.path, opened, disk: editorText };
     const outcome = await this.absorbInto(target, record.base, previousEditorText);
+    this.replacedDiskTexts.delete(fileId);
     this.deps.history.record(fileId, editorText);
     return outcome;
   }
@@ -89,11 +93,22 @@ export class FileReconciler {
       return "conflict";
     }
     const current = target.opened.text.toString();
+    if (this.isStaleEditorWithTyping(target.fileId, editorText, current, previousEditorText)) {
+      await this.saveDiskCopy(target, editorText); // merging against the new base would revert the remote edit
+      return "conflict";
+    }
     const base = this.absorbBase(target.fileId, recordBase, editorText, current, previousEditorText);
     const decision = decideDiskReconcile({ base, disk: editorText, current });
     if (decision.kind === "merge") applyMinimalDiff(target.opened.text, decision.text, EDITOR_TEXT_ORIGIN);
     if (decision.kind === "conflict") await this.saveDiskCopy(target, decision.diskCopy);
     return decision.kind;
+  }
+
+  /** The editor was not reloaded after the engine replaced its disk text, and the user typed on the old text. */
+  private isStaleEditorWithTyping(fileId: string, editorText: string, current: string, previousEditorText?: string): boolean {
+    const replaced = this.replacedDiskTexts.get(fileId);
+    if (previousEditorText !== undefined || replaced === undefined) return false;
+    return editorText !== replaced && editorText !== current && !this.deps.history.has(fileId, editorText);
   }
 
   private absorbBase(fileId: string, recordBase: string, editorText: string, current: string, previousEditorText?: string): string | null {
