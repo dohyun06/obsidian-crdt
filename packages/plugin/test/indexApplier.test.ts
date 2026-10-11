@@ -12,6 +12,13 @@ const NOTE_ID = "aaaaaaaa-0000-4000-8000-000000000001";
 const OTHER_ID = "bbbbbbbb-0000-4000-8000-000000000002";
 const CREATED_AT = Date.UTC(2026, 9, 7, 12);
 
+/** Lists paths in a raw form (leading separator) that normalizeVaultPath turns into the vault path. */
+class RawListingVault extends FakeVault {
+  override async listFiles(): Promise<string[]> {
+    return (await super.listFiles()).map((path) => `/${path}`);
+  }
+}
+
 class FailingRenameVault extends FakeVault {
   override async rename(): Promise<void> {
     throw new Error("rename failed: disk error");
@@ -40,6 +47,14 @@ async function setup(vault: FakeVault, targets: Record<string, string>, records:
 describe("IndexApplier case-only moves on a case-sensitive vault (regression: record pointed at another note)", () => {
   it("defers a case-only move when a different file already sits at the exact target spelling", async () => {
     const vault = new FakeVault({ "Note.md": "mine", "note.md": "someone else" });
+    const { applier, store } = await setup(vault, { [NOTE_ID]: "note.md" }, { [NOTE_ID]: "Note.md" });
+    await applier.apply();
+    expect(store.get(NOTE_ID)).toEqual({ path: "Note.md", base: "mine" });
+    expect(Object.fromEntries(vault.files)).toEqual({ "Note.md": "mine", "note.md": "someone else" });
+  });
+
+  it("compares the exact target spelling against normalized listed paths", async () => {
+    const vault = new RawListingVault({ "Note.md": "mine", "note.md": "someone else" });
     const { applier, store } = await setup(vault, { [NOTE_ID]: "note.md" }, { [NOTE_ID]: "Note.md" });
     await applier.apply();
     expect(store.get(NOTE_ID)).toEqual({ path: "Note.md", base: "mine" });

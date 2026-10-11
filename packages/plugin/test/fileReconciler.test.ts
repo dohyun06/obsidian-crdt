@@ -1,3 +1,4 @@
+import { MAX_SYNC_FILE_BYTES } from "@obsidian-crdt/shared";
 import { describe, expect, it } from "vitest";
 import { DocManager } from "../src/core/docManager";
 import { TextHistory } from "../src/core/textHistory";
@@ -21,16 +22,17 @@ async function setup(options: { files?: Record<string, string>; online?: boolean
   const docs = new DocManager({ vaultId: VAULT, syncer, persistence: new MemoryPersistence(), onTextChanged: () => {} });
   const notices: SyncNotice[] = [];
   const retries: string[] = [];
+  const history = new TextHistory();
   const reconciler = new FileReconciler({
     vault,
     records,
     docs,
     now: () => NOW,
-    history: new TextHistory(),
+    history,
     notify: (notice) => notices.push(notice),
     requestRetry: (fileId) => retries.push(fileId),
   });
-  return { hub, vault, syncer, records, docs, reconciler, notices, retries };
+  return { hub, vault, syncer, records, docs, reconciler, notices, retries, history };
 }
 
 describe("FileReconciler", () => {
@@ -155,5 +157,15 @@ describe("FileReconciler", () => {
     expect(t.vault.files.get(copies[0] as string)).toBe("stale");
     expect(t.vault.files.get("a.md")).toBe("server");
     expect(t.notices).toHaveLength(1);
+  });
+
+  it("keeps an oversize editor text as a copy but does not remember it in the text history", async () => {
+    const t = await setup({ files: { "a.md": "v1" } });
+    await t.records.set(FILE, { path: "a.md", base: "v1" });
+    (await t.docs.open(FILE)).text.insert(0, "v1");
+    const oversize = "x".repeat(MAX_SYNC_FILE_BYTES + 1);
+    expect(await t.reconciler.absorbEditorText(FILE, oversize)).toBe("conflict");
+    expect([...t.vault.files.values()]).toContain(oversize);
+    expect(t.history.has(FILE, oversize)).toBe(false);
   });
 });

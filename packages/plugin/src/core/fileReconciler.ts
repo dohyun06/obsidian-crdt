@@ -70,7 +70,7 @@ export class FileReconciler {
    * On a conflict the Y.Text is kept and the editor text is saved as a conflict-disk copy, so it is never lost.
    * `previousEditorText` (an editor text an earlier request of the same bind already merged) is the base then, so
    * only the delta typed since is merged. Every absorbed editor text is recorded in the TextHistory: it carries
-   * nothing new any more, so a second pane showing the same text does not merge it twice.
+   * nothing new any more, so a second pane showing the same text does not merge it twice (oversize texts excepted).
    * An editor that still shows the disk text this engine replaced while no editor was bound, plus typing, keeps the
    * Y.Text (the remote edit) and its text is saved as a conflict-disk copy. The remembered replaced text is consumed
    * by the first bind after the replace.
@@ -82,7 +82,8 @@ export class FileReconciler {
     const target: Target = { fileId, path: record.path, opened, disk: editorText };
     const outcome = await this.absorbInto(target, record.base, previousEditorText);
     this.replacedDiskTexts.delete(fileId);
-    this.deps.history.record(fileId, editorText);
+    // An oversize text never entered the Y.Text (it is only a copy): do not hold it in memory as a known state.
+    if (isWithinSizeLimit(editorText)) this.deps.history.record(fileId, editorText);
     return outcome;
   }
 
@@ -93,7 +94,7 @@ export class FileReconciler {
       return "conflict";
     }
     const current = target.opened.text.toString();
-    if (this.isStaleEditorWithTyping(target.fileId, editorText, current, previousEditorText)) {
+    if (this.isStaleEditorWithTyping(target.fileId, recordBase, editorText, current, previousEditorText)) {
       await this.saveDiskCopy(target, editorText); // merging against the new base would revert the remote edit
       return "conflict";
     }
@@ -104,10 +105,13 @@ export class FileReconciler {
     return decision.kind;
   }
 
-  /** The editor was not reloaded after the engine replaced its disk text, and the user typed on the old text. */
-  private isStaleEditorWithTyping(fileId: string, editorText: string, current: string, previousEditorText?: string): boolean {
+  /**
+   * The editor was not reloaded after the engine replaced its disk text, and the user typed on the old text.
+   * An editor showing the base (the replacing text) did reload: newer remote edits are merged normally then.
+   */
+  private isStaleEditorWithTyping(fileId: string, recordBase: string, editorText: string, current: string, previousEditorText?: string): boolean {
     const replaced = this.replacedDiskTexts.get(fileId);
-    if (previousEditorText !== undefined || replaced === undefined) return false;
+    if (previousEditorText !== undefined || replaced === undefined || editorText === recordBase) return false;
     return editorText !== replaced && editorText !== current && !this.deps.history.has(fileId, editorText);
   }
 

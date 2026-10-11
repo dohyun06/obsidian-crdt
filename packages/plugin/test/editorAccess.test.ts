@@ -63,6 +63,19 @@ describe("editor text absorbed when an editor binds (regression: unsaved text wi
     expect(copies()).toEqual(["v1\ntyped\n"]);
   });
 
+  it("makes no conflict copy when the editor shows the base while a newer remote edit waits for the disk", async () => {
+    const { a, b } = await pairWithNote("v1\n");
+    b.vault.externalWrite("n.md", "v1\nremote\n"); // A's engine replaces v1 on A's disk while no editor is bound
+    await settle([a, b]);
+    a.openInEditor.add("n.md"); // Obsidian opens the file (loading the new disk text) before it is bound
+    b.vault.externalWrite("n.md", "v1\nremote\nnewer\n"); // reaches A's Y.Text but not A's disk
+    await settle([a, b]);
+    expect(a.vault.files.get("n.md")).toBe("v1\nremote\n");
+    const doc = await a.engine.openDocForPath("n.md", "v1\nremote\n");
+    expect(doc?.text.toString()).toBe("v1\nremote\nnewer\n");
+    expect([...a.vault.files.keys()].filter((path) => path.includes("conflict-disk"))).toEqual([]);
+  });
+
   it("keeps the Y.Text and saves the editor text as a conflict copy when they cannot merge", async () => {
     const { a, b } = await pairWithNote("The quick brown fox jumps over the lazy dog");
     a.openInEditor.add("n.md");

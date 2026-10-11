@@ -1,4 +1,4 @@
-import { foldPathCase } from "@obsidian-crdt/shared";
+import { foldPathCase, normalizeVaultPath } from "@obsidian-crdt/shared";
 import type { DocManager } from "./docManager";
 import type { FileReconciler } from "./fileReconciler";
 import type { VaultPort } from "./ports";
@@ -72,7 +72,7 @@ export class IndexApplier {
    */
   private async isTargetBusy(sourcePath: string, targetPath: string): Promise<boolean> {
     if (foldPathCase(targetPath) !== foldPathCase(sourcePath)) return (await this.deps.vault.read(targetPath)) !== null;
-    return (await this.deps.vault.listFiles()).includes(targetPath);
+    return (await this.deps.vault.listFiles()).map(normalizeVaultPath).includes(targetPath);
   }
 
   /** The record moves first, so the resulting rename event is ignored; a failed rename restores it. */
