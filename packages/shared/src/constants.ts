@@ -4,6 +4,8 @@ export const DISK_WRITE_DEBOUNCE_MS = 1000;
 export const INDEX_PASS_DEBOUNCE_MS = 200;
 /** A delete followed by a create with identical content inside this window is a rename (e.g. `git mv`). */
 export const RENAME_PAIR_WINDOW_MS = 1500;
+/** Idle time after which the Y.Text of a file open in an editor is remembered as a possible autosave state. */
+export const EDITOR_SNAPSHOT_DEBOUNCE_MS = 200;
 export const RECONNECT_MAX_DELAY_MS = 30_000;
 export const MASS_DELETE_WINDOW_MS = 10_000;
 export const MASS_DELETE_THRESHOLD = 10;

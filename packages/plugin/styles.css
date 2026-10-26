@@ -1,0 +1,10 @@
+.crdt-sync-status {
+  font-variant-numeric: tabular-nums;
+}
+
+.crdt-sync-modal-list {
+  max-height: 40vh;
+  overflow-y: auto;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}

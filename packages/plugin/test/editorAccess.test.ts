@@ -1,0 +1,170 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { LoopbackHub } from "./fakes/loopback";
+import { type Device, settle, startDevice } from "./fakes/device";
+
+const running: Device[] = [];
+afterEach(async () => {
+  for (const device of running.splice(0)) await device.engine.stop();
+});
+
+async function pairWithNote(text: string): Promise<{ a: Device; b: Device }> {
+  const hub = new LoopbackHub();
+  const a = await startDevice(hub, "A");
+  const b = await startDevice(hub, "B");
+  running.push(a, b);
+  a.vault.externalWrite("n.md", text);
+  await settle([a, b]);
+  return { a, b };
+}
+
+describe("editor text absorbed when an editor binds (regression: unsaved text wiped on attach)", () => {
+  it("merges text typed while the editor was unbound into the Y.Text", async () => {
+    const { a, b } = await pairWithNote("hello\n");
+    a.openInEditor.add("n.md"); // the editor shows the file, so remote edits are not flushed to disk meanwhile
+    b.vault.externalWrite("n.md", "B line\nhello\n");
+    await settle([a, b]);
+    const doc = await a.engine.openDocForPath("n.md", "hello\nworld\n");
+    expect(doc?.text.toString()).toBe("B line\nhello\nworld\n");
+    await settle([a, b]);
+    expect(b.vault.files.get("n.md")).toBe("B line\nhello\nworld\n");
+  });
+
+  it("takes unsaved editor text when the Y.Text still holds the base", async () => {
+    const { a, b } = await pairWithNote("hello\n");
+    const doc = await a.engine.openDocForPath("n.md", "hello\ntyped while unbound\n");
+    expect(doc?.text.toString()).toBe("hello\ntyped while unbound\n");
+    await settle([a, b]);
+    expect(b.vault.files.get("n.md")).toBe("hello\ntyped while unbound\n");
+  });
+
+  it("does not revert a remote edit when the editor still shows the disk text the engine just replaced", async () => {
+    const { a, b } = await pairWithNote("v1\n");
+    b.vault.externalWrite("n.md", "v1\nremote\n"); // A's engine writes it to A's disk before the editor reloads
+    await settle([a, b]);
+    expect(a.vault.files.get("n.md")).toBe("v1\nremote\n");
+    const doc = await a.engine.openDocForPath("n.md", "v1\n"); // Obsidian has not reloaded the editor yet
+    expect(doc?.text.toString()).toBe("v1\nremote\n");
+  });
+
+  it("keeps a remote edit and saves a stale editor's typing as a conflict copy (regression: remote edit reverted)", async () => {
+    const { a, b } = await pairWithNote("v1\n");
+    b.vault.externalWrite("n.md", "v1\nremote\n"); // A's engine replaces v1 on A's disk while no editor is bound
+    await settle([a, b]);
+    const stale = (await a.engine.openDocForPath("n.md", "v1\ntyped\n"))!; // not reloaded, and the user typed
+    expect(stale.text.toString()).toBe("v1\nremote\n");
+    const copies = () => [...a.vault.files.entries()].filter(([path]) => path.includes("conflict-disk")).map(([, text]) => text);
+    expect(copies()).toEqual(["v1\ntyped\n"]);
+    expect(a.notices.some((notice) => notice.kind === "conflict-copy")).toBe(true);
+    a.engine.notifyEditorClosed("n.md", stale.fileId);
+    await settle([a, b]);
+    // The guard covers only the first bind after the replace: a later bind with typing is a normal merge.
+    const later = await a.engine.openDocForPath("n.md", "v1\nremote\nlater\n");
+    expect(later?.text.toString()).toBe("v1\nremote\nlater\n");
+    expect(copies()).toEqual(["v1\ntyped\n"]);
+  });
+
+  it("makes no conflict copy when the editor shows the base while a newer remote edit waits for the disk", async () => {
+    const { a, b } = await pairWithNote("v1\n");
+    b.vault.externalWrite("n.md", "v1\nremote\n"); // A's engine replaces v1 on A's disk while no editor is bound
+    await settle([a, b]);
+    a.openInEditor.add("n.md"); // Obsidian opens the file (loading the new disk text) before it is bound
+    b.vault.externalWrite("n.md", "v1\nremote\nnewer\n"); // reaches A's Y.Text but not A's disk
+    await settle([a, b]);
+    expect(a.vault.files.get("n.md")).toBe("v1\nremote\n");
+    const doc = await a.engine.openDocForPath("n.md", "v1\nremote\n");
+    expect(doc?.text.toString()).toBe("v1\nremote\nnewer\n");
+    expect([...a.vault.files.keys()].filter((path) => path.includes("conflict-disk"))).toEqual([]);
+  });
+
+  it("keeps the Y.Text and saves the editor text as a conflict copy when they cannot merge", async () => {
+    const { a, b } = await pairWithNote("The quick brown fox jumps over the lazy dog");
+    a.openInEditor.add("n.md");
+    b.vault.externalWrite("n.md", "0123456789");
+    await settle([a, b]);
+    const doc = await a.engine.openDocForPath("n.md", "The quick red fox jumps over the lazy dog");
+    expect(doc?.text.toString()).toBe("0123456789");
+    const copies = [...a.vault.files.entries()].filter(([path]) => path.includes("conflict-disk"));
+    expect(copies.map(([, text]) => text)).toEqual(["The quick red fox jumps over the lazy dog"]);
+    expect(a.notices.some((notice) => notice.kind === "conflict-copy")).toBe(true);
+  });
+});
+
+describe("bind re-requests and second panes merge each typed text once (regression: duplicated lines)", () => {
+  it("merges only the delta typed since the previous request of the same bind", async () => {
+    const { a } = await pairWithNote("hello\n");
+    const first = "hello\nworld one\n";
+    const second = "hello\nworld one two\n"; // the user kept typing while request 1 was in flight
+    await a.engine.openDocForPath("n.md", first);
+    const doc = await a.engine.openDocForPath("n.md", second, first);
+    expect(doc?.text.toString()).toBe(second);
+  });
+
+  it("does not merge an editor text a second time when another pane shows the same absorbed text", async () => {
+    const { a } = await pairWithNote("hello\n");
+    const shown = "hello\ntyped\n";
+    const doc = (await a.engine.openDocForPath("n.md", shown))!;
+    doc.text.insert(doc.text.length, "more\n"); // the bound pane keeps typing
+    await a.engine.openDocForPath("n.md", shown); // a second pane, still unbound, shows the earlier text
+    expect(doc.text.toString()).toBe("hello\ntyped\nmore\n");
+  });
+});
+
+describe("files open in an editor are tracked by fileId (regression: rename of an open note)", () => {
+  it("does not merge a lagging autosave a second time when the open note is renamed", async () => {
+    const { a, b } = await pairWithNote("hello\n");
+    a.openInEditor.add("n.md");
+    const doc = (await a.engine.openDocForPath("n.md"))!;
+    doc.text.insert(6, "abc"); // typing...
+    const intermediate = doc.text.toString();
+    doc.text.insert(9, "def"); // ...continues before any idle snapshot
+    a.vault.externalWrite("n.md", intermediate); // Obsidian autosave of a mid-burst state
+    await settle([a]);
+    // the user renames the still-open note; the bridge has not rebound yet (its open set is keyed by the old path)
+    a.vault.externalRename("n.md", "m.md");
+    await settle([a, b]);
+    expect(doc.text.toString()).toBe("hello\nabcdef");
+  });
+
+  it("treats a file as open by fileId even when the path-based signal is off", async () => {
+    const { a, b } = await pairWithNote("hello\n");
+    const doc = (await a.engine.openDocForPath("n.md"))!;
+    b.vault.externalWrite("n.md", "hello\nremote\n");
+    await settle([a, b]);
+    expect(doc.text.toString()).toBe("hello\nremote\n");
+    expect(a.vault.files.get("n.md")).toBe("hello\n"); // the editor owns the open file
+    a.engine.notifyEditorClosed("n.md", doc.fileId);
+    await settle([a, b]);
+    expect(a.vault.files.get("n.md")).toBe("hello\nremote\n");
+  });
+
+  it("keeps a file open until every editor that opened it has closed", async () => {
+    const { a, b } = await pairWithNote("hello\n");
+    const first = (await a.engine.openDocForPath("n.md"))!;
+    await a.engine.openDocForPath("n.md");
+    a.engine.notifyEditorClosed("n.md", first.fileId);
+    b.vault.externalWrite("n.md", "hello\nremote\n");
+    await settle([a, b]);
+    expect(a.vault.files.get("n.md")).toBe("hello\n");
+    a.engine.notifyEditorClosed("n.md", first.fileId);
+    await settle([a, b]);
+    expect(a.vault.files.get("n.md")).toBe("hello\nremote\n");
+  });
+});
+
+describe("debug events", () => {
+  it("logs routed vault events, echoes, opens and closes without note text", async () => {
+    const { a, b } = await pairWithNote("secret body\n");
+    a.vault.externalRename("n.md", "m.md");
+    await settle([a, b]);
+    const doc = (await b.engine.openDocForPath("m.md", "secret body\nsecret typed\n"))!;
+    b.engine.notifyEditorClosed("m.md", doc.fileId);
+    await settle([a, b]);
+    const names = (device: Device) => device.debugEvents.map((entry) => entry.event);
+    expect(a.debugEvents).toContainEqual({ event: "vault-event", fields: { kind: "rename", oldPath: "n.md", path: "m.md" } });
+    expect(names(b)).toContain("echo-consumed"); // B's own rename of the file, applied from the index
+    expect(b.debugEvents).toContainEqual({ event: "open-doc", fields: { path: "m.md", outcome: "absorbed-merge" } });
+    expect(b.debugEvents).toContainEqual({ event: "editor-open", fields: { fileId: doc.fileId, count: 1 } });
+    expect(b.debugEvents).toContainEqual({ event: "editor-closed", fields: { fileId: doc.fileId, stillOpen: false } });
+    expect(JSON.stringify([...a.debugEvents, ...b.debugEvents])).not.toContain("secret");
+  });
+});

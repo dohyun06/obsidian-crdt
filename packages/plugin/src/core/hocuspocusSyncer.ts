@@ -36,9 +36,13 @@ export class HocuspocusSyncer implements DocSyncer {
       token: this.options.token,
       onAuthenticationFailed: () => this.handleAuthFailed(),
     });
+    // No presence until an editor binds this doc: a non-null local state is renewed every 15 s for every
+    // subscribed doc (thousands of notes → constant awareness traffic). attachSync publishes it on bind.
+    provider.awareness?.setLocalState(null);
     provider.attach();
     this.providers.add(provider);
     return {
+      awareness: provider.awareness ?? null,
       isSynced: () => provider.isSynced,
       whenSynced: () => waitForSynced(provider),
       destroy: () => {

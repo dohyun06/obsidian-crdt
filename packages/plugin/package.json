@@ -3,14 +3,27 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "install-dev": "node scripts/install-dev.mjs"
+  },
   "dependencies": {
     "@hocuspocus/provider": "^4.7.0",
     "@obsidian-crdt/shared": "*",
     "diff-match-patch": "^1.0.5",
+    "y-codemirror.next": "^0.3.6",
+    "y-protocols": "^1.0.7",
     "yjs": "^13.6.33"
   },
   "devDependencies": {
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6",
     "@obsidian-crdt/server": "*",
-    "@types/diff-match-patch": "^1.0.36"
+    "@types/diff-match-patch": "^1.0.36",
+    "esbuild": "^0.28.2",
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^30.1.2",
+    "obsidian": "1.13.1"
   }
 }

@@ -87,6 +87,7 @@ export class LoopbackSyncer implements DocSyncer {
     this.links.add(link);
     if (this.online) link.up();
     return {
+      awareness: null,
       isSynced: () => link.isUp,
       whenSynced: () => link.whenSynced(),
       destroy: () => {

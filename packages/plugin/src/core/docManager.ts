@@ -26,22 +26,36 @@ interface DocSlot {
 
 export class DocManager {
   private readonly slots = new Map<string, Promise<DocSlot>>();
+  private readonly ready = new Map<string, OpenedDoc>();
 
   constructor(private readonly deps: DocManagerDeps) {}
 
   async open(fileId: string): Promise<OpenedDoc> {
     let slot = this.slots.get(fileId);
     if (!slot) {
-      slot = this.createSlot(fileId);
-      this.slots.set(fileId, slot);
+      const created = this.createSlot(fileId);
+      slot = created;
+      this.slots.set(fileId, created);
+      // A failed attach (e.g. a storage hiccup) must not poison this file for the rest of the session.
+      created.catch(() => {
+        if (this.slots.get(fileId) === created) this.slots.delete(fileId);
+      });
     }
     return (await slot).opened;
   }
 
+  /** The doc if it has finished opening; never starts an open. */
+  peek(fileId: string): OpenedDoc | undefined {
+    return this.ready.get(fileId);
+  }
+
   async closeAll(): Promise<void> {
-    const slots = await Promise.all(this.slots.values());
+    const settled = await Promise.allSettled(this.slots.values());
     this.slots.clear();
-    for (const { opened, persisted } of slots) {
+    this.ready.clear();
+    for (const result of settled) {
+      if (result.status !== "fulfilled") continue;
+      const { opened, persisted } = result.value;
       opened.sync.destroy();
       persisted.destroy();
       opened.doc.destroy();
@@ -56,6 +70,8 @@ export class DocManager {
       if (origin !== DISK_ORIGIN) this.deps.onTextChanged(fileId);
     });
     const sync = this.deps.syncer.connect(docName, doc);
-    return { opened: { fileId, doc, text: doc.getText(CONTENT_TEXT_KEY), sync }, persisted };
+    const opened: OpenedDoc = { fileId, doc, text: doc.getText(CONTENT_TEXT_KEY), sync };
+    this.ready.set(fileId, opened);
+    return { opened, persisted };
   }
 }

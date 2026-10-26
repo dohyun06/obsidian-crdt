@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
+import * as Y from "yjs";
+import { buildIndexDocName } from "@obsidian-crdt/shared";
 import { createJsonLogger, createSyncServer, DocumentStore, openDatabase, TokenStore } from "@obsidian-crdt/server";
 import { HocuspocusSyncer } from "../src/core/hocuspocusSyncer";
 import type { SyncNotice } from "../src/core/notices";
@@ -118,5 +120,15 @@ describe("end to end with the real server", () => {
     const rejectionsNow = logs.filter((line) => line.includes("auth.rejected")).length;
     await new Promise((resolve) => setTimeout(resolve, 1500));
     expect(logs.filter((line) => line.includes("auth.rejected")).length).toBe(rejectionsNow);
+  });
+
+  it("publishes no presence for documents without a bound editor (regression: awareness renewal spam)", async () => {
+    const { url, token } = await startServer();
+    const syncer = new HocuspocusSyncer({ url, token, onAuthFailed: () => {} });
+    cleanups.push(() => syncer.destroy());
+    const handle = syncer.connect(buildIndexDocName(TEST_VAULT_ID), new Y.Doc());
+    expect(handle.awareness?.getLocalState()).toBeNull();
+    await handle.whenSynced();
+    expect(handle.awareness?.getLocalState()).toBeNull();
   });
 });

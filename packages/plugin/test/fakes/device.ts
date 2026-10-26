@@ -15,6 +15,7 @@ export const FAST_TIMING: SyncTiming = {
   renamePairWindowMs: 20,
   massDeleteWindowMs: 60_000,
   massDeleteThreshold: 5,
+  editorSnapshotDebounceMs: 2,
 };
 
 export interface Device {
@@ -26,6 +27,13 @@ export interface Device {
   engine: SyncEngine;
   notices: SyncNotice[];
   openInEditor: Set<string>;
+  /** Every engine debug event, for asserting on diagnostics. */
+  debugEvents: DebugEvent[];
+}
+
+export interface DebugEvent {
+  event: string;
+  fields: Record<string, string | number | boolean>;
 }
 
 export interface DeviceOptions {
@@ -41,6 +49,7 @@ export function createDevice(hub: LoopbackHub, name: string, options: DeviceOpti
   const syncer = new LoopbackSyncer(hub, { online: options.online ?? true });
   const notices: SyncNotice[] = [];
   const openInEditor = options.reuse?.openInEditor ?? new Set<string>();
+  const debugEvents: DebugEvent[] = [];
   const engine = new SyncEngine({
     vaultId: TEST_VAULT_ID,
     vault,
@@ -51,8 +60,9 @@ export function createDevice(hub: LoopbackHub, name: string, options: DeviceOpti
     now: () => FIXED_NOW,
     notify: (notice) => notices.push(notice),
     timing: FAST_TIMING,
+    debug: (event, fields) => debugEvents.push({ event, fields }),
   });
-  return { name, vault, storage, persistence, syncer, engine, notices, openInEditor };
+  return { name, vault, storage, persistence, syncer, engine, notices, openInEditor, debugEvents };
 }
 
 export async function startDevice(hub: LoopbackHub, name: string, options: DeviceOptions = {}): Promise<Device> {

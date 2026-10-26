@@ -1,3 +1,4 @@
+import type { Awareness } from "y-protocols/awareness";
 import type * as Y from "yjs";
 
 export type VaultEvent =
@@ -41,6 +42,8 @@ export interface DocSyncHandle {
   isSynced(): boolean;
   whenSynced(): Promise<void>;
   destroy(): void;
+  /** Presence channel for remote cursors; null when the transport has none. */
+  readonly awareness: Awareness | null;
 }
 
 export interface DocSyncer {

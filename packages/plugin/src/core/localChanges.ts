@@ -18,7 +18,7 @@ export interface LocalChangeDeps {
   now: () => number;
   notify: (notice: SyncNotice) => void;
   isEligible: (path: string) => boolean;
-  isOpenInEditor: (path: string) => boolean;
+  isOpenInEditor: (fileId: string | null, path: string) => boolean;
 }
 
 interface PendingDelete {
@@ -31,13 +31,14 @@ interface PendingDelete {
 export class LocalChangeHandler {
   private readonly pendingDeletes = new Map<string, PendingDelete>();
   private pausedDeletes: PendingDelete[] = [];
+  private readonly oversizeNotified = new Set<string>();
 
   constructor(private readonly deps: LocalChangeDeps) {}
 
   async handleCreate(path: string): Promise<void> {
     if (!this.deps.isEligible(path)) return;
     const knownId = this.deps.records.findIdByPath(path);
-    if (knownId) return this.deps.reconciler.reconcile(knownId);
+    if (knownId) return this.reconcileUnlessOpen(knownId, path);
     const live = this.deps.index.findLiveByPath(path);
     // A live entry this device still tracks at another path is a remote move the index pass has not applied yet.
     // Taking it over would orphan the file at the old path; instead this file is registered as its own entry and
@@ -45,7 +46,14 @@ export class LocalChangeHandler {
     if (live && !this.deps.records.get(live.fileId)) return this.adoptRemoteEntry(live.fileId, path);
     const text = await this.deps.vault.read(path);
     if (text === null) return;
-    if (!isWithinSizeLimit(text)) return this.deps.notify({ kind: "file-too-large", path });
+    if (!isWithinSizeLimit(text)) {
+      if (!this.oversizeNotified.has(path)) {
+        this.oversizeNotified.add(path);
+        this.deps.notify({ kind: "file-too-large", path });
+      }
+      return;
+    }
+    this.oversizeNotified.delete(path);
     const renamed = this.takePendingDeleteWithBase(text);
     if (renamed) return this.moveTracked(renamed.fileId, path);
     await this.registerNew(path, text);
@@ -54,12 +62,8 @@ export class LocalChangeHandler {
   async handleModify(path: string): Promise<void> {
     if (!this.deps.isEligible(path)) return;
     const fileId = this.deps.records.findIdByPath(path);
-    if (this.deps.isOpenInEditor(path)) {
-      // The editor owns open files (spec §4.1); only an autosave that matches the Y.Text is taken, as the new base.
-      if (fileId) await this.deps.reconciler.acceptEditorSave(fileId);
-      return;
-    }
-    if (fileId) return this.deps.reconciler.reconcile(fileId);
+    if (fileId) return this.reconcileUnlessOpen(fileId, path);
+    if (this.deps.isOpenInEditor(null, path)) return;
     return this.handleCreate(path);
   }
 
@@ -124,7 +128,14 @@ export class LocalChangeHandler {
     const record = this.deps.records.get(fileId);
     this.deps.index.rename(fileId, newPath);
     await this.deps.records.set(fileId, { path: newPath, base: record?.base ?? null });
-    await this.deps.reconciler.reconcile(fileId);
+    // A renamed open note keeps its editor: the disk may hold a lagging autosave that must not be merged again.
+    await this.reconcileUnlessOpen(fileId, newPath);
+  }
+
+  /** The editor owns open files (spec §4.1); only an autosave that matches the Y.Text is taken, as the new base. */
+  private reconcileUnlessOpen(fileId: string, path: string): Promise<void> {
+    if (this.deps.isOpenInEditor(fileId, path)) return this.deps.reconciler.acceptEditorSave(fileId);
+    return this.deps.reconciler.reconcile(fileId);
   }
 
   private async registerNew(path: string, text: string): Promise<void> {
