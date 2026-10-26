@@ -2,6 +2,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { setup, tick, views } from "./fakes/editorBridgeHarness";
 
+const TYPED = { userEvent: "input.type" };
+
 afterEach(() => views.splice(0).forEach((view) => view.destroy()));
 
 describe("EditorBridge: text typed while unbound", () => {
@@ -10,7 +12,7 @@ describe("EditorBridge: text typed while unbound", () => {
     const text = source.track("a.md", "x");
     const { view } = open("pending.md", "x");
     await tick(8); // untracked: the bridge keeps retrying
-    view.dispatch({ changes: { from: 1, insert: " typed while unbound" } }); // not saved yet
+    view.dispatch({ changes: { from: 1, insert: " typed while unbound" }, ...TYPED }); // not saved yet
     source.texts.set("pending.md", text);
     await tick(40);
     expect(view.state.doc.toString()).toBe("x typed while unbound");
@@ -21,10 +23,10 @@ describe("EditorBridge: text typed while unbound", () => {
     const { source, open } = setup();
     const text = source.track("a.md", "x");
     let view: ReturnType<typeof open>["view"] | null = null;
-    source.duringOpen = () => view!.dispatch({ changes: { from: 1, insert: "y" } });
+    source.duringOpen = () => view!.dispatch({ changes: { from: 1, insert: "y" }, ...TYPED });
     view = open("a.md", "x").view;
     await tick(10);
-    expect(source.editorTexts).toEqual(["x", "xy"]);
+    expect(source.editorTexts).toEqual([undefined, "xy"]); // nothing typed yet at the first request
     expect(text.toString()).toBe("xy");
     expect(view.state.doc.toString()).toBe("xy");
   });
@@ -34,14 +36,28 @@ describe("EditorBridge: text typed while unbound", () => {
     source.track("a.md", "x");
     let view: ReturnType<typeof open>["view"] | null = null;
     source.duringOpen = () => {
-      view!.dispatch({ changes: { from: 1, insert: "1" } }); // typing during request 1
-      source.duringOpen = () => view!.dispatch({ changes: { from: 2, insert: "2" } }); // ...and during request 2
+      view!.dispatch({ changes: { from: 1, insert: "1" }, ...TYPED }); // typing during request 1
+      source.duringOpen = () => view!.dispatch({ changes: { from: 2, insert: "2" }, ...TYPED }); // ...and during request 2
     };
     view = open("a.md", "x").view;
     await tick(10);
-    expect(source.editorTexts).toEqual(["x", "x1", "x12"]);
-    expect(source.previousEditorTexts).toEqual([undefined, "x", "x1"]);
+    expect(source.editorTexts).toEqual([undefined, "x1", "x12"]);
+    expect(source.previousEditorTexts).toEqual([undefined, undefined, "x1"]);
     expect(source.openCount("a.md")).toBe(1);
+  });
+
+  it("never merges the previous note's text when the file switches before its text is loaded (regression: note overwritten)", async () => {
+    const { source, open } = setup();
+    const a = source.track("a.md", "note A");
+    const b = source.track("b.md", "note B");
+    const { view, info } = open("a.md", "note A");
+    await tick();
+    info.path = "b.md"; // Obsidian sets the new file first and loads its text after reading it
+    a.insert(0, "remote "); // a remote edit to the old note reaches the editor in between
+    await tick();
+    expect(source.editorTexts.every((editorText) => editorText === undefined)).toBe(true);
+    expect(b.toString()).toBe("note B");
+    expect(view.state.doc.toString()).toBe("note B");
   });
 
   it("passes no previous editor text after a request that found no doc", async () => {

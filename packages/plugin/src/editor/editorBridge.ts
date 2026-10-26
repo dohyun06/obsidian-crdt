@@ -1,4 +1,4 @@
-import type { Extension } from "@codemirror/state";
+import type { Extension, Transaction } from "@codemirror/state";
 import { type EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import type { DebugLog, EditorDoc } from "../core/syncEngine";
 import { attachSync, boundPathOf, detachSync, type EditorUser, editorSyncExtension, type FileOf } from "./editorSync";
@@ -46,10 +46,18 @@ interface OpenedFor {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Typing, deleting or moving lines by the user; not Obsidian loading a file or a remote change. */
+const isUserEdit = (tr: Transaction) => tr.docChanged && (tr.isUserEvent("input") || tr.isUserEvent("delete") || tr.isUserEvent("move"));
+
 export class EditorBridge {
   private readonly views = new Set<EditorView>();
   private readonly bindings = new Map<EditorView, Binding>();
   private readonly openCounts = new Map<string, number>();
+  /**
+   * Views the user edited while unbound. Only their text is merged at bind: an unbound editor may still show the
+   * previous file (Obsidian sets the new file before it loads its text), and merging that would overwrite the note.
+   */
+  private readonly typedWhileUnbound = new Set<EditorView>();
   private generation = 0;
   /** Set between detachAll and refreshAll so the detach's own transaction does not rebind the editor. */
   private paused = false;
@@ -66,6 +74,7 @@ export class EditorBridge {
           update: (update: ViewUpdate) => this.onUpdate(update),
           destroy: () => {
             this.views.delete(view);
+            this.typedWhileUnbound.delete(view);
             this.release(view, true).catch((error) => this.deps.reportError(error));
           },
         };
@@ -98,6 +107,7 @@ export class EditorBridge {
   private onUpdate(update: ViewUpdate): void {
     const binding = this.bindings.get(update.view);
     const path = this.deps.fileOf(update.state);
+    if (binding?.attached !== true && update.transactions.some(isUserEdit)) this.typedWhileUnbound.add(update.view);
     const guardDetached = binding?.attached === true && boundPathOf(update.state) === null;
     if (guardDetached) this.debug("guard-drop", { path: binding.path });
     if (path !== (binding?.path ?? null) || guardDetached) this.schedule(update.view);
@@ -155,8 +165,8 @@ export class EditorBridge {
   }
 
   /**
-   * Opens the doc with the editor's current text, so text typed while unbound is merged instead of wiped by the
-   * alignment. Asks again (bounded) when the user typed while the request was in flight, passing the text the
+   * Opens the doc with the editor's current text when the user typed while unbound, so that text is merged instead
+   * of wiped by the alignment. Asks again (bounded) when the user typed while the request was in flight, passing the text the
    * previous request merged so only the newly typed delta is merged (not the whole text a second time). Every
    * superseded open is reported closed after the next one, so the engine's open count stays balanced and never
    * drops to zero.
@@ -167,18 +177,20 @@ export class EditorBridge {
     let opened: OpenedFor | null = null;
     let absorbedText: string | undefined;
     for (let request = 1; ; request++) {
-      const editorText = view.state.doc.toString();
+      const editorText = this.typedWhileUnbound.has(view) ? view.state.doc.toString() : undefined;
       const doc = await source.openDocForPath(path, editorText, absorbedText);
       if (opened) source.notifyEditorClosed(path, opened.doc.fileId);
       opened = doc ? { source, doc } : null;
-      if (!opened || view.state.doc.toString() === editorText || request > EDITOR_TEXT_REQUESTS) return opened;
-      absorbedText = editorText; // this request returned a doc: its editor text is in the Y.Text now
+      const typedMeanwhile = this.typedWhileUnbound.has(view) && view.state.doc.toString() !== editorText;
+      if (!opened || !typedMeanwhile || request > EDITOR_TEXT_REQUESTS) return opened;
+      if (editorText !== undefined) absorbedText = editorText; // this request returned a doc: its editor text is in the Y.Text now
       this.debug("bind-editor-changed", { path, request });
     }
   }
 
   private attach(view: EditorView, path: string, opened: OpenedFor): void {
     attachSync(view, { path, text: opened.doc.text, awareness: opened.doc.awareness, user: this.deps.getUser() });
+    this.typedWhileUnbound.delete(view);
     this.openCounts.set(path, (this.openCounts.get(path) ?? 0) + 1);
     const binding = this.bindings.get(view);
     if (binding) {
